@@ -7,15 +7,17 @@ Pool de contas ChatGPT Plus/Pro via OAuth para o provider `openai-codex` do Pi.
 ## Recursos
 
 - Várias contas ChatGPT com login Browser OAuth ou Device Code.
+- Importação automática da conta OAuth já autenticada no Pi.
 - Conta sticky por sessão do Pi.
 - Renovação automática de tokens.
-- Rotação para outra conta após falhas 401/403/429/5xx.
+- Rotação imediata para outra conta após falhas 401/403/429/5xx, com repetição da mesma solicitação.
+- Compatibilidade com os transportes SSE e WebSocket do Codex.
 - Seleção de conta pelo TUI e ferramentas para o agente.
 - Estado separado por projeto/sessão, sem expor tokens ao modelo.
 - Summarizer configurável com qualquer provider/modelo disponível no Pi.
 - Lista de fallbacks para o summarizer; se o primary falhar, o próximo modelo é tentado.
-- Handoff automático quando o failover troca a conta Codex, além de handoff manual para uma nova sessão.
-- Consulta de quota, failover preventivo e espera persistida por reset de quota.
+- Handoff manual para uma nova sessão, independente da troca de conta.
+- Consulta de quota, rotação preventiva e espera persistida por reset de quota.
 - Notas duráveis, trimming do contexto após handoff e ferramentas completas de administração.
 
 ## Instalação
@@ -37,7 +39,9 @@ Depois reinicie o Pi ou execute `/reload`.
 
 `/codex-handoff-config` lista todos os modelos autenticados/configurados no Pi. Escolha um modelo primary e informe fallbacks no formato `provider/model,provider/model`. Esses modelos podem ser de providers diferentes (OpenAI, Anthropic, Google, OpenRouter etc.).
 
-Quando uma conta Codex falha e outra é selecionada, o plugin gera um resumo usando o primary e tenta cada fallback configurado. O handoff pendente é injetado no próximo request sem apagar o histórico da sessão.
+Quando uma conta Codex falha antes de começar a resposta, a extensão repete a mesma solicitação com a próxima conta disponível. Não é necessário gerar resumo nem trocar de sessão, pois o modelo e o histórico continuam os mesmos.
+
+O summarizer é usado somente pelo comando manual `/codex-handoff`. Ele tenta o modelo principal e, se necessário, cada fallback configurado.
 
 No menu, adicione as contas e escolha **Usar nesta sessão**. O agente também pode usar:
 
@@ -45,10 +49,10 @@ No menu, adicione as contas e escolha **Usar nesta sessão**. O agente também p
 - `codex_account_current`
 - `codex_account_set_active`
 
-Por segurança, a extensão só intercepta o provider `openai-codex`. Para incluir outro provider explicitamente:
+Por segurança, a extensão só substitui o stream do provider `openai-codex`. A variável abaixo pode desativar essa substituição ao omitir `openai-codex`; outros providers não usam tokens ChatGPT e não são compatíveis com este pool:
 
 ```bash
-PI_CODEX_ACCOUNT_POOL_PROVIDERS=openai-codex,meu-provider pi
+PI_CODEX_ACCOUNT_POOL_PROVIDERS=openai-codex pi
 ```
 
 Comandos adicionais:
@@ -63,6 +67,8 @@ Variáveis opcionais:
 
 ```bash
 PI_CODEX_QUOTA_ENDPOINT=https://chatgpt.com/backend-api/wham/usage
+# desativa a importação automática da conta OAuth já salva no Pi
+PI_CODEX_ACCOUNT_POOL_IMPORT_AUTH=0
 ```
 
 Diretório de dados alternativo:
@@ -75,10 +81,10 @@ PI_CODEX_ACCOUNT_POOL_DATA_DIR=/caminho/seguro pi
 
 ```bash
 npm install
-npm run typecheck
+npm test
 pi -e ./src/index.ts
 ```
 
 ## Diferenças em relação ao plugin OpenCode
 
-O Pi não expõe uma camada `fetch` substituível por plugin nem o mesmo sistema de TUI/provider hooks do OpenCode. Esta versão usa os hooks `before_provider_headers` e `after_provider_response` do Pi, mantém a seleção por sessão e oferece comandos/ferramentas nativos. O handoff/summarizer e a UI específica do OpenCode não são copiados porque não possuem equivalente direto e seguro no Pi.
+O provider Codex monta os headers de autenticação depois dos hooks genéricos e o transporte WebSocket não emite todas as respostas HTTP para extensões. Por isso, esta extensão registra um wrapper do stream `openai-codex-responses`, injeta o token selecionado diretamente na chamada e controla o failover antes de qualquer conteúdo ser emitido. A seleção continua isolada por sessão e os tokens permanecem fora do contexto enviado ao modelo.

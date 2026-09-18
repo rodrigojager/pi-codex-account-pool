@@ -80,7 +80,7 @@ export async function createHandoff(ctx: ExtensionContext, sourceAccount?: strin
   if (!branch.length) return undefined
   const conversation = serializeConversation(convertToLlm(branch.map((entry) => entry.type === "message" ? entry.message : undefined).filter(Boolean) as never[])).slice(-settings.maxInputChars)
   const notes = await getNotes(ctx.sessionManager.getSessionId())
-  const prompt = `Você é um summarizer de continuidade para um agente de programação. Gere um handoff conciso e acionável em Markdown. Preserve objetivo, decisões, arquivos alterados, testes/verificações, bloqueios e próximos passos. Não invente fatos.\n\nMotivo da troca: ${reason}\n\nNotas duráveis:\n${notes.map((note) => `- ${note}`).join("\\n") || "(nenhuma)"}\n\n<conversation>\n${conversation}\n</conversation>`
+  const prompt = `Você é um summarizer de continuidade para um agente de programação. Gere um handoff conciso e acionável em Markdown. Preserve objetivo, decisões, arquivos alterados, testes/verificações, bloqueios e próximos passos. Não invente fatos.\n\nMotivo da troca: ${reason}\n\nNotas duráveis:\n${notes.map((note) => `- ${note}`).join("\n") || "(nenhuma)"}\n\n<conversation>\n${conversation}\n</conversation>`
   const result = await completeWithFailover(ctx, prompt, ctx.signal)
   const sessionID = ctx.sessionManager.getSessionId()
   const data = await readSaved()

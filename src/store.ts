@@ -115,7 +115,8 @@ export class AccountStore {
   }
 
   async initialize() {
-    await this.importLegacyIfNeeded()
+    const current = await this.importLegacyIfNeeded()
+    if (current.initialized) return true
     return this.update((data) => {
       const previous = data.initialized
       data.initialized = true
