@@ -14,7 +14,7 @@ export const paths = {
   root: dataRoot(),
   settings: join(dataRoot(), "settings.json"),
   accounts: join(dataRoot(), "accounts.json"),
-  legacyAccounts: process.env.OPENCODE_CODEX_ACCOUNTS_PATH ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "opencode", "codex-account-pool.json"),
+  legacyAccounts: process.env.PI_CODEX_ACCOUNT_POOL_ACCOUNTS_PATH ?? join(process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "codex-account-pool-legacy.json"),
   bindings: join(dataRoot(), "bindings.json"),
   jobs: join(dataRoot(), "scheduler", "jobs.json"),
   summaryQueue: join(dataRoot(), "scheduler", "summary-queue.json"),
