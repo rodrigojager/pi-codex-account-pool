@@ -15,7 +15,7 @@ import { AccountStore, type Account } from "./store"
 import { browserAuthorization, cancelBrowserAuthorization, deviceAuthorization, tokenIdentity, refreshTokens } from "./oauth"
 import { paths, transact } from "./storage"
 import { QuotaService, blockedUntil, nearLimit } from "./quota"
-import { addHandoffNote, clearPendingHandoff, completeWithFailover, createHandoff, getPendingHandoff, handoffContextMessage, loadHandoffSettings, saveHandoffSettings, type ModelRef } from "./handoff"
+import { addHandoffNote, clearPendingHandoff, completeWithFailover, createHandoff, getPendingHandoff, handoffContextMessage, loadHandoffSettings, saveHandoffSettings, type HandoffModelOptions, type ModelRef } from "./handoff"
 import { orderAccounts, rotateAccounts } from "./bindings"
 import { cooldownUntil, failureMessage, failureStatus, shouldRotateAccount } from "./failover"
 
@@ -478,6 +478,32 @@ async function addAccount(ctx: ExtensionContext) {
   await enablePoolRuntime(ctx, account)
   ctx.ui.notify(`Conta adicionada${identity.email ? `: ${identity.email}` : ""}`, "info")
 }
+async function configureHandoffModelOptions(ctx: ExtensionContext, ref: ModelRef, current: HandoffModelOptions = {}) {
+  const reasoning = await ctx.ui.select(`Reasoning do summarizer · ${ref}`, ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"])
+  if (!reasoning) return undefined
+  const maxTokensRaw = await ctx.ui.input("Máximo de tokens da resposta", String(current.maxTokens ?? 4096))
+  if (maxTokensRaw === undefined) return undefined
+  const maxTokens = Number(maxTokensRaw)
+  if (!Number.isInteger(maxTokens) || maxTokens < 256) throw new Error("maxTokens deve ser um inteiro maior ou igual a 256")
+  const temperatureRaw = await ctx.ui.input("Temperature (vazio = padrão do provider)", current.temperature === undefined ? "" : String(current.temperature))
+  if (temperatureRaw === undefined) return undefined
+  const temperature = temperatureRaw.trim() === "" ? undefined : Number(temperatureRaw)
+  if (temperature !== undefined && (!Number.isFinite(temperature) || temperature < 0 || temperature > 2)) throw new Error("Temperature deve estar entre 0 e 2")
+  const timeoutRaw = await ctx.ui.input("Timeout em segundos", String(Math.round((current.timeoutMs ?? 60_000) / 1000)))
+  if (timeoutRaw === undefined) return undefined
+  const timeoutSeconds = Number(timeoutRaw)
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 600) throw new Error("Timeout deve estar entre 1 e 600 segundos")
+  const samplingRaw = await ctx.ui.input("Sampling params JSON (vazio = nenhum)", current.samplingParams ? JSON.stringify(current.samplingParams) : "")
+  if (samplingRaw === undefined) return undefined
+  let samplingParams: Record<string, unknown> | undefined
+  if (samplingRaw.trim()) {
+    const parsed = JSON.parse(samplingRaw)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Sampling params deve ser um objeto JSON")
+    samplingParams = parsed
+  }
+  return { reasoning: reasoning as HandoffModelOptions["reasoning"], maxTokens, temperature, timeoutMs: Math.round(timeoutSeconds * 1000), samplingParams }
+}
+
 async function menu(ctx: ExtensionContext) {
   if (!ctx.hasUI) return
   for (;;) {
@@ -602,10 +628,38 @@ export default function (pi: ExtensionAPI) {
       : undefined
     if (mode === "Escolher modelo" && !primary) return
     let fallbacks = [...current.fallbacks]
+    let maxInputChars = current.maxInputChars
+    const modelOptions = { ...current.modelOptions }
     for (;;) {
-      const action = await ctx.ui.select(`Fallbacks do handoff (${fallbacks.length} configurados)`, ["Adicionar fallback", "Remover fallback", "Limpar fallbacks", "Salvar", "Cancelar"])
+      const action = await ctx.ui.select(`Handoff · ${fallbacks.length} fallback(s) · entrada ${maxInputChars} chars`, ["Configurar opções do modelo", "Restaurar opções do modelo", "Configurar tamanho da entrada", "Adicionar fallback", "Remover fallback", "Limpar fallbacks", "Salvar", "Cancelar"])
       if (!action || action === "Cancelar") return
       if (action === "Salvar") break
+      if (action === "Configurar tamanho da entrada") {
+        const raw = await ctx.ui.input("Máximo de caracteres enviados ao summarizer", String(maxInputChars))
+        if (raw === undefined) continue
+        const value = Number(raw)
+        if (!Number.isInteger(value) || value < 1_000 || value > 2_000_000) { ctx.ui.notify("Use um inteiro entre 1000 e 2000000.", "warning"); continue }
+        maxInputChars = value
+        continue
+      }
+      if (action === "Configurar opções do modelo" || action === "Restaurar opções do modelo") {
+        const currentRef = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` as ModelRef : undefined
+        const configuredRefs = [...new Set([primary as ModelRef | undefined, ...fallbacks, !primary ? currentRef : undefined].filter(Boolean))] as ModelRef[]
+        if (!configuredRefs.length) { ctx.ui.notify("Escolha um modelo principal ou fallback primeiro.", "warning"); continue }
+        const selected = await ctx.ui.select("Modelo para configurar", configuredRefs)
+        if (!selected) continue
+        const ref = selected as ModelRef
+        if (action === "Restaurar opções do modelo") {
+          delete modelOptions[ref]
+          ctx.ui.notify(`Opções restauradas: ${ref}`, "info")
+          continue
+        }
+        try {
+          const options = await configureHandoffModelOptions(ctx, ref, modelOptions[ref])
+          if (options) modelOptions[ref] = options
+        } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error") }
+        continue
+      }
       if (action === "Limpar fallbacks") { fallbacks = []; continue }
       if (action === "Remover fallback") {
         const candidates = available.filter((model) => fallbacks.includes(`${model.provider}/${model.id}` as ModelRef)).map(({ provider, id, name }) => ({ provider, id, name }))
@@ -625,7 +679,7 @@ export default function (pi: ExtensionAPI) {
         if (selected) fallbacks.push(selected as ModelRef)
       }
     }
-    await saveHandoffSettings({ primary: primary as ModelRef | undefined, fallbacks, maxInputChars: current.maxInputChars })
+    await saveHandoffSettings({ primary: primary as ModelRef | undefined, fallbacks, maxInputChars, modelOptions })
     ctx.ui.notify(`Summarizer salvo: ${primary ?? "modelo atual + fallbacks"}`, "info")
   } })
   pi.registerCommand("codex-handoff", { description: "Gerar handoff e abrir uma nova sessão", handler: async (args, ctx) => {

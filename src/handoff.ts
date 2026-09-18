@@ -1,24 +1,41 @@
 import { randomUUID } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { join } from "node:path"
-import { uuidv7 } from "@earendil-works/pi-ai"
+import { uuidv7, type ModelThinkingLevel } from "@earendil-works/pi-ai"
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent"
 import { atomicWrite, paths } from "./storage"
 
 export type ModelRef = `${string}/${string}`
-export type HandoffSettings = { primary?: ModelRef; fallbacks: ModelRef[]; maxInputChars: number }
+export type HandoffModelOptions = {
+  reasoning?: ModelThinkingLevel | "auto"
+  maxTokens?: number
+  temperature?: number
+  timeoutMs?: number
+  samplingParams?: Record<string, unknown>
+}
+export type HandoffSettings = {
+  primary?: ModelRef
+  fallbacks: ModelRef[]
+  maxInputChars: number
+  modelOptions: Partial<Record<ModelRef, HandoffModelOptions>>
+}
 type SavedHandoff = { id: string; sessionID: string; sourceAccount?: string; targetAccount?: string; summary: string; createdAt: number }
 
 const settingsPath = join(paths.root, "handoff.json")
 const handoffsPath = join(paths.root, "handoffs.json")
 const notesPath = join(paths.root, "notes.json")
-const defaults: HandoffSettings = { fallbacks: [], maxInputChars: 80_000 }
+const defaults: HandoffSettings = { fallbacks: [], maxInputChars: 80_000, modelOptions: {} }
 
 export async function loadHandoffSettings(): Promise<HandoffSettings> {
   try {
     const raw = JSON.parse(await readFile(settingsPath, "utf8"))
-    return { ...defaults, ...raw, fallbacks: Array.isArray(raw.fallbacks) ? raw.fallbacks : [] }
+    return {
+      ...defaults,
+      ...raw,
+      fallbacks: Array.isArray(raw.fallbacks) ? raw.fallbacks : [],
+      modelOptions: raw.modelOptions && typeof raw.modelOptions === "object" && !Array.isArray(raw.modelOptions) ? raw.modelOptions : {},
+    }
   } catch { return defaults }
 }
 export async function saveHandoffSettings(settings: HandoffSettings) {
@@ -65,7 +82,17 @@ export async function completeWithFailover(ctx: ExtensionContext, prompt: string
     const model = parsed ? ctx.modelRegistry.find(parsed.provider, parsed.id) : undefined
     if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) { errors.push(`${ref}: indisponível`); continue }
     try {
-      const response = await ctx.modelRegistry.complete(model, { messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }] }, { signal, cacheRetention: "none", sessionId: uuidv7(), maxTokens: 4096 })
+      const configured = settings.modelOptions[ref as ModelRef] ?? {}
+      const response = await ctx.modelRegistry.complete(model, { messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }] }, {
+        signal,
+        cacheRetention: "none",
+        sessionId: uuidv7(),
+        maxTokens: configured.maxTokens ?? 4096,
+        reasoning: configured.reasoning && configured.reasoning !== "auto" && configured.reasoning !== "off" ? configured.reasoning : undefined,
+        temperature: configured.temperature,
+        timeoutMs: configured.timeoutMs,
+        samplingParams: configured.samplingParams,
+      })
       const text = textOf(response)
       if (text) return { text, model: ref }
       errors.push(`${ref}: resposta vazia`)

@@ -19,6 +19,8 @@ Pool de contas ChatGPT Plus/Pro via OAuth exposto como provider próprio `codex-
 - Estado separado por projeto/sessão, sem expor tokens ao modelo.
 - Summarizer configurável com qualquer provider/modelo disponível no Pi.
 - Lista de fallbacks para o summarizer; se o primary falhar, o próximo modelo é tentado.
+- Opções por modelo para o summarizer: reasoning, máximo de tokens, temperature, timeout e parâmetros de sampling em JSON.
+- Limite configurável do contexto enviado ao summarizer.
 - Handoff manual para uma nova sessão, independente da troca de conta.
 - Consulta de quota, rotação preventiva e espera persistida por reset de quota.
 - Notas duráveis, trimming do contexto após handoff e ferramentas completas de administração.
@@ -40,7 +42,9 @@ Depois reinicie o Pi ou execute `/reload`.
 /codex-handoff [próximo objetivo opcional]
 ```
 
-`/codex-handoff-config` lista todos os modelos autenticados/configurados no Pi. Escolha um modelo primary e informe fallbacks no formato `provider/model,provider/model`. Esses modelos podem ser de providers diferentes (OpenAI, Anthropic, Google, OpenRouter etc.).
+`/codex-handoff-config` lista dinamicamente todos os modelos autenticados/configurados no Pi. Escolha um modelo primary e os fallbacks; eles podem ser de providers diferentes (OpenAI, Anthropic, Google, OpenRouter, extensões de terceiros etc.). Modelos adicionados por outra extensão, como `opencode-free`, aparecem automaticamente no seletor — não existe uma lista fixa no pool.
+
+O mesmo configurador permite definir opções independentes por modelo: nível de reasoning (`auto`, `off`, `minimal`, `low`, `medium`, `high`, `xhigh` ou `max`), máximo de tokens, temperature, timeout e parâmetros avançados de sampling em JSON. Também é possível limitar o número de caracteres da conversa enviados ao summarizer e restaurar as opções padrão de um modelo.
 
 Quando uma conta Codex falha antes de começar a resposta, a extensão repete a mesma solicitação com a próxima conta disponível. Não é necessário gerar resumo nem trocar de sessão, pois o modelo e o histórico continuam os mesmos.
 
