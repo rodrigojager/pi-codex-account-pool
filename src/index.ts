@@ -37,6 +37,46 @@ let initialized = false
 const tokenRefreshes = new Map<string, Promise<Account>>()
 const sessionContexts = new Map<string, ExtensionContext>()
 let extensionAPI: ExtensionAPI | undefined
+let sourceModelRegistry: ExtensionContext["modelRegistry"] | undefined
+
+function poolModelConfig(model: Model<any>) {
+  return {
+    id: model.id,
+    name: model.name,
+    api: model.api,
+    reasoning: model.reasoning,
+    thinkingLevelMap: model.thinkingLevelMap,
+    input: [...model.input],
+    cost: model.cost,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    compat: model.compat,
+  }
+}
+function currentCodexModels() {
+  return sourceModelRegistry?.getAll().filter((model) => model.provider === "openai-codex") ?? []
+}
+function validStoredModel(value: unknown): value is Model<any> {
+  if (!value || typeof value !== "object") return false
+  const model = value as Partial<Model<any>>
+  return typeof model.id === "string" && typeof model.name === "string" && typeof model.api === "string" &&
+    typeof model.reasoning === "boolean" && Array.isArray(model.input) && typeof model.contextWindow === "number" &&
+    typeof model.maxTokens === "number" && !!model.cost && typeof model.cost === "object"
+}
+async function refreshedCodexModelConfigs() {
+  const byID = new Map<string, Model<any>>()
+  for (const model of Object.values(OPENAI_CODEX_MODELS)) byID.set(model.id, model)
+  try {
+    const agentDir = process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent")
+    const raw = JSON.parse(await readFile(join(agentDir, "models-store.json"), "utf8")) as Record<string, any>
+    const stored = raw["openai-codex"]?.models
+    if (Array.isArray(stored)) for (const model of stored) if (validStoredModel(model)) byID.set(model.id, model)
+  } catch {
+    // O catálogo embarcado mantém o provider disponível offline.
+  }
+  for (const model of currentCodexModels()) byID.set(model.id, model)
+  return [...byID.values()].map(poolModelConfig)
+}
 
 async function loadBindings() {
   if (initialized) return
@@ -489,18 +529,12 @@ export default function (pi: ExtensionAPI) {
     // Mantém o provider visível antes da primeira conta ser ativada. O stream
     // sempre injeta a credencial da conta vinculada à sessão.
     apiKey: "codex-account-pool-runtime",
-    models: Object.values(OPENAI_CODEX_MODELS).map((model) => ({
-      id: model.id,
-      name: model.name,
-      api: model.api,
-      reasoning: model.reasoning,
-      thinkingLevelMap: model.thinkingLevelMap,
-      input: [...model.input],
-      cost: model.cost,
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
-      compat: model.compat,
-    })),
+    // Bootstrap offline com o catálogo embarcado; em cada refresh do Pi,
+    // espelha o catálogo efetivo de openai-codex (inclusive models-store).
+    models: Object.values(OPENAI_CODEX_MODELS).map(poolModelConfig),
+    async refreshModels() {
+      return refreshedCodexModelConfigs()
+    },
     streamSimple: (model, context, options) => lazyStream(model, async () => streamWithAccountPool(
       model as Model<"openai-codex-responses">,
       context,
@@ -509,6 +543,8 @@ export default function (pi: ExtensionAPI) {
   })
 
   pi.on("session_start", async (_event, ctx) => {
+    sourceModelRegistry = ctx.modelRegistry
+    await ctx.modelRegistry.refresh({ allowNetwork: false, providers: [PROVIDER_ID], signal: ctx.signal })
     await store.initialize()
     await importPiCodexAuth()
     await loadWaiting()
@@ -543,6 +579,7 @@ export default function (pi: ExtensionAPI) {
     sessionContexts.delete(sessionId(ctx))
     cancelBrowserAuthorization("Login cancelado porque a sessão foi encerrada ou recarregada")
     extensionAPI = undefined
+    sourceModelRegistry = undefined
     unregisterQuotaBridge()
   })
   pi.on("context", async (event, ctx) => {

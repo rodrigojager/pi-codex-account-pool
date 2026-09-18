@@ -7,7 +7,8 @@ Pool de contas ChatGPT Plus/Pro via OAuth exposto como provider próprio `codex-
 ## Recursos
 
 - Provider separado `codex-account-pool`, sem sobrescrever `openai-codex`.
-- Catálogo oficial de modelos Codex, visível diretamente em `/model`.
+- Catálogo oficial e dinâmico de modelos Codex, visível diretamente em `/model`.
+- Espelhamento do catálogo efetivo de `openai-codex` e do `models-store.json`, com fallback offline embarcado.
 - Várias contas ChatGPT com login Browser OAuth ou Device Code.
 - Importação automática da conta OAuth já autenticada no Pi.
 - Conta sticky por sessão do Pi.
