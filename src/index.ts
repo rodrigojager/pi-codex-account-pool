@@ -1,17 +1,17 @@
-import { execFile } from "node:child_process"
+import { openBrowser } from "./browser"
+import { accountMenuRows } from "./account-menu"
+import { pickHandoffModel } from "./model-picker"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { readFile, writeFile, mkdir } from "node:fs/promises"
-import { promisify } from "node:util"
 import { Type } from "typebox"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { AccountStore, type Account } from "./store"
-import { browserAuthorization, deviceAuthorization, tokenIdentity, refreshTokens } from "./oauth"
+import { browserAuthorization, cancelBrowserAuthorization, deviceAuthorization, tokenIdentity, refreshTokens } from "./oauth"
 import { atomicWrite, paths } from "./storage"
 import { QuotaService, blockedUntil, nearLimit } from "./quota"
 import { addHandoffNote, clearPendingHandoff, completeWithFailover, createHandoff, getPendingHandoff, handoffContextMessage, loadHandoffSettings, saveHandoffSettings, type ModelRef } from "./handoff"
 
-const exec = promisify(execFile)
 const PROVIDERS = new Set((process.env.PI_CODEX_ACCOUNT_POOL_PROVIDERS ?? "openai-codex").split(",").map((x) => x.trim()).filter(Boolean))
 const store = new AccountStore()
 const quota = new QuotaService(store)
@@ -73,10 +73,6 @@ async function refreshIfNeeded(account: Account) {
   })
   return (await store.snapshot()).accounts.find((a) => a.id === account.id) ?? account
 }
-function openBrowser(url: string) {
-  if (process.platform === "win32") return exec("cmd", ["/c", "start", "", url]).catch(() => {})
-  return exec(process.platform === "darwin" ? "open" : "xdg-open", [url]).catch(() => {})
-}
 async function addAccount(ctx: ExtensionContext) {
   if (!ctx.hasUI) throw new Error("Adicionar conta requer o modo interativo do Pi")
   const method = await ctx.ui.select("Login Codex", ["Browser OAuth", "Device code"])
@@ -84,8 +80,14 @@ async function addAccount(ctx: ExtensionContext) {
   let tokens
   if (method === "Browser OAuth") {
     const auth = await browserAuthorization()
-    await openBrowser(auth.url)
-    ctx.ui.notify("A janela de login do ChatGPT foi aberta.", "info")
+    // Attach a handler immediately, including while the browser launcher is running.
+    void auth.callback.catch(() => {})
+    try {
+      await openBrowser(auth.url)
+      ctx.ui.notify("A janela de login do ChatGPT foi aberta.", "info")
+    } catch {
+      ctx.ui.notify(`Não foi possível abrir o navegador. Abra este link completo para continuar:\n${auth.url}`, "warning")
+    }
     tokens = await auth.callback
   } else {
     const auth = await deviceAuthorization()
@@ -101,18 +103,25 @@ async function menu(ctx: ExtensionContext) {
   if (!ctx.hasUI) return
   for (;;) {
     const data = await accounts()
-    const choices = ["+ Adicionar conta", "Atualizar tokens", ...data.accounts.map((a) => `${a.enabled ? "●" : "○"} ${a.label}${a.email ? ` — ${a.email}` : ""}`), "Fechar"]
+    const active = await usableAccount(ctx)
+    const rows = accountMenuRows(data.accounts, data.order, active?.id)
+    const choices = ["+ Adicionar conta", "Atualizar tokens", ...rows.map((row) => row.label), "Fechar"]
     const choice = await ctx.ui.select("Codex Account Pool", choices)
     if (!choice || choice === "Fechar") return
     if (choice === "+ Adicionar conta") { try { await addAccount(ctx) } catch (e) { ctx.ui.notify(String(e), "error") }; continue }
     if (choice === "Atualizar tokens") { ctx.ui.notify("Tokens são renovados automaticamente antes de expirar.", "info"); continue }
-    const account = data.accounts.find((a) => choice.includes(a.label))
+    const account = rows.find((row) => row.label === choice)?.account
     if (!account) continue
-    const action = await ctx.ui.select(account.label, ["Usar nesta sessão", account.enabled ? "Desativar" : "Ativar", "Definir como principal", "Renomear", "Remover", "Voltar"])
+    const action = await ctx.ui.select(account.label, ["Usar nesta sessão", account.enabled ? "Desativar" : "Ativar", "Definir como principal", "Alterar prioridade", "Renomear", "Remover", "Voltar"])
     if (action === "Usar nesta sessão") { await loadBindings(); bindings[sessionId(ctx)] = account.id; await saveBindings(); ctx.ui.notify(`Conta ativa: ${account.label}`, "info") }
     else if (action === "Desativar") await store.setEnabled(account.id, false)
     else if (action === "Ativar") await store.setEnabled(account.id, true)
     else if (action === "Definir como principal") await store.setDefault(account.id)
+    else if (action === "Alterar prioridade") {
+      const positions = rows.map((_, index) => `${index + 1}${index === 0 ? " — Principal" : ""}`)
+      const position = await ctx.ui.select("Prioridade (1 = maior)", positions)
+      if (position) await store.setPriority(account.id, positions.indexOf(position))
+    }
     else if (action === "Renomear") { const label = await ctx.ui.input("Novo nome", account.label); if (label) await store.renameAccount(account.id, label) }
     else if (action === "Remover" && await ctx.ui.confirm("Remover conta?", "Os tokens locais serão apagados.")) await store.remove(account.id)
   }
@@ -137,7 +146,11 @@ export default function (pi: ExtensionAPI) {
     })().catch(() => {}), 30_000)
     waitTimer.unref?.()
   })
-  pi.on("session_shutdown", async () => { if (waitTimer) clearInterval(waitTimer); waitTimer = undefined })
+  pi.on("session_shutdown", async () => {
+    if (waitTimer) clearInterval(waitTimer)
+    waitTimer = undefined
+    cancelBrowserAuthorization("Login cancelado porque a sessão foi encerrada ou recarregada")
+  })
   pi.on("before_provider_headers", async (event, ctx) => {
     if (!ctx.model || !PROVIDERS.has(ctx.model.provider)) return
     const account = await usableAccount(ctx)
@@ -203,12 +216,38 @@ export default function (pi: ExtensionAPI) {
     const available = ctx.modelRegistry.getAvailable()
     const refs = available.map((model) => `${model.provider}/${model.id}` as ModelRef)
     const current = await loadHandoffSettings()
-    const primary = await ctx.ui.select("Modelo primary do summarizer", ["Desativado", ...refs])
-    if (!primary) return
-    const fallbackText = await ctx.ui.input("Fallbacks (provider/model separados por vírgula)", current.fallbacks.join(","))
-    const valid = (fallbackText ?? "").split(",").map((x) => x.trim()).filter((x) => refs.includes(x as ModelRef)) as ModelRef[]
-    await saveHandoffSettings({ primary: primary === "Desativado" ? undefined : primary as ModelRef, fallbacks: valid, maxInputChars: current.maxInputChars })
-    ctx.ui.notify(`Summarizer salvo: ${primary === "Desativado" ? "modelo atual + fallbacks" : primary}`, "info")
+    const mode = await ctx.ui.select("Modelo principal do handoff", ["Escolher modelo", "Usar modelo atual"])
+    if (!mode) return
+    const primary = mode === "Escolher modelo"
+      ? await pickHandoffModel(ctx, "Handoff · principal · digite para filtrar", available, current.primary)
+      : undefined
+    if (mode === "Escolher modelo" && !primary) return
+    let fallbacks = [...current.fallbacks]
+    for (;;) {
+      const action = await ctx.ui.select(`Fallbacks do handoff (${fallbacks.length} configurados)`, ["Adicionar fallback", "Remover fallback", "Limpar fallbacks", "Salvar", "Cancelar"])
+      if (!action || action === "Cancelar") return
+      if (action === "Salvar") break
+      if (action === "Limpar fallbacks") { fallbacks = []; continue }
+      if (action === "Remover fallback") {
+        const candidates = available.filter((model) => fallbacks.includes(`${model.provider}/${model.id}` as ModelRef)).map(({ provider, id, name }) => ({ provider, id, name }))
+        // Keep saved, currently unavailable models removable as well.
+        for (const ref of fallbacks.filter((ref) => !refs.includes(ref))) {
+          const slash = ref.indexOf("/")
+          candidates.push({ provider: ref.slice(0, slash), id: ref.slice(slash + 1), name: ref })
+        }
+        const selected = await pickHandoffModel(ctx, "Handoff · remover fallback", candidates)
+        if (selected) fallbacks = fallbacks.filter((ref) => ref !== selected)
+      } else {
+        const candidates = available.filter((model) => {
+          const ref = `${model.provider}/${model.id}` as ModelRef
+          return ref !== primary && !fallbacks.includes(ref)
+        })
+        const selected = await pickHandoffModel(ctx, "Handoff · adicionar fallback · digite para filtrar", candidates)
+        if (selected) fallbacks.push(selected as ModelRef)
+      }
+    }
+    await saveHandoffSettings({ primary: primary as ModelRef | undefined, fallbacks, maxInputChars: current.maxInputChars })
+    ctx.ui.notify(`Summarizer salvo: ${primary ?? "modelo atual + fallbacks"}`, "info")
   } })
   pi.registerCommand("codex-handoff", { description: "Gerar handoff e abrir uma nova sessão", handler: async (args, ctx) => {
     if (!ctx.hasUI) return

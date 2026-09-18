@@ -44,7 +44,15 @@ export class FileLock {
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
         const info = await stat(path).catch(() => undefined)
-        if (!info || Date.now() - info.mtimeMs > staleMs) {
+        const existing = await readFile(path, "utf8").then(JSON.parse).catch(() => undefined)
+        let ownerExited = false
+        if (existing?.hostname === hostname() && Number.isInteger(existing.pid) && existing.pid > 0) {
+          try { process.kill(existing.pid, 0) } catch (cause) {
+            // EPERM does not mean the owner exited. Never reclaim remote-host locks here.
+            ownerExited = (cause as NodeJS.ErrnoException).code === "ESRCH"
+          }
+        }
+        if (!info || Date.now() - info.mtimeMs > staleMs || ownerExited) {
           await rm(path, { force: true }).catch(() => {})
           continue
         }

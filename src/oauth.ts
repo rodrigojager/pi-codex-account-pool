@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http"
 import { FileLock } from "./storage"
+import { oauthPageHeaders, oauthSuccessPage } from "./oauth-page"
 
 export const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 export const DEFAULT_ISSUER = "https://auth.openai.com"
@@ -194,8 +195,8 @@ function oauthServer(issuer: string, port: number) {
     void exchangeCode(code, callbackUrl, current.pkce, issuer).then(
       (tokens) => {
         response
-          .writeHead(200, { "Content-Type": "text/html; charset=utf-8", Connection: "close" })
-          .end("<h1>OpenCode autorizado</h1><p>Voce pode fechar esta janela.</p>")
+          .writeHead(200, oauthPageHeaders)
+          .end(oauthSuccessPage())
         current.resolve(tokens)
       },
       (cause) => {
