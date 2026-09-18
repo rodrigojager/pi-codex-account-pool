@@ -80,6 +80,18 @@ test("empty search results cannot select, Escape cancels", () => {
   assert.equal(result(), undefined)
 })
 
+test("provider stays visible when a long model label is truncated", () => {
+  const long = [{ provider: "codex-account-pool", id: "a-model-id-that-is-deliberately-much-longer-than-the-picker-row", name: "Long model" }]
+  const picker = new HandoffModelPicker({
+    title: "Handoff", models: long, rows: () => 24,
+    theme: Object.fromEntries(["selectedPrefix", "selectedText", "description", "scrollInfo", "noMatch"].map((k) => [k, identity])),
+    accent: identity, matches: () => false, done: () => {},
+  })
+  const rendered = picker.render(35).join("\n")
+  assert.match(rendered, /codex-account-pool/)
+  assert.ok(picker.render(35).every((line) => visibleWidth(line) <= 35))
+})
+
 test("resize keeps selection visible and lines within terminal bounds", () => {
   const { picker, result, resize } = setup()
   for (let i = 0; i < 150; i++) picker.handleInput("tui.select.down")

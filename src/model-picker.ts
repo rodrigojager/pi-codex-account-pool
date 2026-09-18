@@ -26,7 +26,9 @@ export class HandoffModelPicker {
   constructor(private options: PickerOptions) {
     this.items = [...options.models].sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id)).map((model) => ({
       value: `${model.provider}/${model.id}`,
-      label: `${model.id} [${model.provider}]`,
+      // SelectList truncates at the right edge. Put the provider first so it
+      // remains visible even when a long model ID/name exhausts the row.
+      label: `[${model.provider}] ${model.id}`,
       description: model.name,
     }))
     this.filtered = this.items
