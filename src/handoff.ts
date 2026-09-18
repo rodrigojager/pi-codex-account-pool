@@ -12,6 +12,7 @@ type SavedHandoff = { id: string; sessionID: string; sourceAccount?: string; tar
 
 const settingsPath = join(paths.root, "handoff.json")
 const handoffsPath = join(paths.root, "handoffs.json")
+const notesPath = join(paths.root, "notes.json")
 const defaults: HandoffSettings = { fallbacks: [], maxInputChars: 80_000 }
 
 export async function loadHandoffSettings(): Promise<HandoffSettings> {
@@ -34,6 +35,15 @@ function textOf(response: { content: Array<{ type: string; text?: string }> }) {
 }
 async function readSaved(): Promise<Record<string, SavedHandoff>> {
   try { return JSON.parse(await readFile(handoffsPath, "utf8")) } catch { return {} }
+}
+export async function addHandoffNote(sessionID: string, note: string) {
+  let notes: Record<string, string[]> = {}
+  try { notes = JSON.parse(await readFile(notesPath, "utf8")) } catch { /* first note */ }
+  notes[sessionID] = [...(notes[sessionID] ?? []), note.trim()].filter(Boolean).slice(-50)
+  await atomicWrite(notesPath, notes, false)
+}
+async function getNotes(sessionID: string) {
+  try { const notes = JSON.parse(await readFile(notesPath, "utf8")) as Record<string, string[]>; return notes[sessionID] ?? [] } catch { return [] }
 }
 export async function getPendingHandoff(sessionID: string) {
   const data = await readSaved()
@@ -69,7 +79,8 @@ export async function createHandoff(ctx: ExtensionContext, sourceAccount?: strin
   const branch = ctx.sessionManager.getBranch()
   if (!branch.length) return undefined
   const conversation = serializeConversation(convertToLlm(branch.map((entry) => entry.type === "message" ? entry.message : undefined).filter(Boolean) as never[])).slice(-settings.maxInputChars)
-  const prompt = `Você é um summarizer de continuidade para um agente de programação. Gere um handoff conciso e acionável em Markdown. Preserve objetivo, decisões, arquivos alterados, testes/verificações, bloqueios e próximos passos. Não invente fatos.\n\nMotivo da troca: ${reason}\n\n<conversation>\n${conversation}\n</conversation>`
+  const notes = await getNotes(ctx.sessionManager.getSessionId())
+  const prompt = `Você é um summarizer de continuidade para um agente de programação. Gere um handoff conciso e acionável em Markdown. Preserve objetivo, decisões, arquivos alterados, testes/verificações, bloqueios e próximos passos. Não invente fatos.\n\nMotivo da troca: ${reason}\n\nNotas duráveis:\n${notes.map((note) => `- ${note}`).join("\\n") || "(nenhuma)"}\n\n<conversation>\n${conversation}\n</conversation>`
   const result = await completeWithFailover(ctx, prompt, ctx.signal)
   const sessionID = ctx.sessionManager.getSessionId()
   const data = await readSaved()

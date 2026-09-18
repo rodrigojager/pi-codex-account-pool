@@ -15,6 +15,8 @@ Pool de contas ChatGPT Plus/Pro via OAuth para o provider `openai-codex` do Pi.
 - Summarizer configurável com qualquer provider/modelo disponível no Pi.
 - Lista de fallbacks para o summarizer; se o primary falhar, o próximo modelo é tentado.
 - Handoff automático quando o failover troca a conta Codex, além de handoff manual para uma nova sessão.
+- Consulta de quota, failover preventivo e espera persistida por reset de quota.
+- Notas duráveis, trimming do contexto após handoff e ferramentas completas de administração.
 
 ## Instalação
 
@@ -47,6 +49,20 @@ Por segurança, a extensão só intercepta o provider `openai-codex`. Para inclu
 
 ```bash
 PI_CODEX_ACCOUNT_POOL_PROVIDERS=openai-codex,meu-provider pi
+```
+
+Comandos adicionais:
+
+```text
+/codex-handoff-status
+/codex-waiting
+/codex-waiting cancel
+```
+
+Variáveis opcionais:
+
+```bash
+PI_CODEX_QUOTA_ENDPOINT=https://chatgpt.com/backend-api/wham/usage
 ```
 
 Diretório de dados alternativo:
