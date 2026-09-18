@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AssistantMessage, AssistantMessageEvent, Context, Model, ProviderResponse, SimpleStreamOptions } from "@earendil-works/pi-ai"
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy"
 import { closeOpenAICodexWebSocketSessions, streamSimple as streamCodex } from "@earendil-works/pi-ai/api/openai-codex-responses"
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models"
 import { AccountStore, type Account } from "./store"
 import { browserAuthorization, cancelBrowserAuthorization, deviceAuthorization, tokenIdentity, refreshTokens } from "./oauth"
 import { paths, transact } from "./storage"
@@ -18,7 +19,10 @@ import { addHandoffNote, clearPendingHandoff, completeWithFailover, createHandof
 import { orderAccounts, rotateAccounts } from "./bindings"
 import { cooldownUntil, failureMessage, failureStatus, shouldRotateAccount } from "./failover"
 
-const PROVIDERS = new Set((process.env.PI_CODEX_ACCOUNT_POOL_PROVIDERS ?? "openai-codex").split(",").map((x) => x.trim()).filter(Boolean))
+const PROVIDER_ID = "codex-account-pool"
+const QUOTA_REQUEST_EVENT = "pi-quota:request"
+const QUOTA_RESPONSE_EVENT = "pi-quota:response"
+const ACCOUNT_CHANGED_EVENT = "codex-account-pool:account-changed"
 const store = new AccountStore()
 const quota = new QuotaService(store)
 const bindingsPath = join(paths.root, "bindings.json")
@@ -32,6 +36,7 @@ let bindings: Record<string, string> = {}
 let initialized = false
 const tokenRefreshes = new Map<string, Promise<Account>>()
 const sessionContexts = new Map<string, ExtensionContext>()
+let extensionAPI: ExtensionAPI | undefined
 
 async function loadBindings() {
   if (initialized) return
@@ -111,11 +116,14 @@ async function candidateAccounts(sessionID: string, excluded = new Set<string>()
 async function usableAccount(ctx: ExtensionContext) {
   return (await candidateAccounts(sessionId(ctx)))[0]
 }
-async function assignedAccount(ctx: ExtensionContext) {
+async function assignedAccountForSession(sessionID: string) {
   await loadBindings()
   const data = await accounts()
-  const id = bindings[sessionId(ctx)] ?? data.defaultAccountID
+  const id = bindings[sessionID] ?? data.defaultAccountID
   return data.accounts.find((account) => account.id === id)
+}
+async function assignedAccount(ctx: ExtensionContext) {
+  return assignedAccountForSession(sessionId(ctx))
 }
 async function activateAccount(sessionID: string, account: Account, clearHandoff = false) {
   await updateBindings((data) => { data[sessionID] = account.id })
@@ -123,7 +131,13 @@ async function activateAccount(sessionID: string, account: Account, clearHandoff
   if (waiting[sessionID]) await updateWaiting((data) => { delete data[sessionID] })
   if (clearHandoff) await clearPendingHandoff(sessionID)
   const ctx = sessionContexts.get(sessionID)
-  if (ctx?.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex: ${account.label}`)
+  if (ctx?.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex Pool: ${account.label}`)
+  extensionAPI?.events.emit(ACCOUNT_CHANGED_EVENT, {
+    provider: PROVIDER_ID,
+    sessionId: sessionID,
+    accountId: account.id,
+    accountLabel: account.label,
+  })
 }
 async function removeAccount(accountID: string) {
   const removed = await store.remove(accountID)
@@ -240,7 +254,7 @@ async function* streamWithAccountPool(
 
     if (managedSession && bindings[sessionID] !== account.id) await activateAccount(sessionID, account)
     const ctx = sessionContexts.get(sessionID)
-    if (ctx?.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex: ${account.label}`)
+    if (ctx?.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex Pool: ${account.label}`)
 
     let response: ProviderResponse | undefined
     const source = streamCodex(model, context, {
@@ -321,7 +335,79 @@ type RuntimeModelRegistry = {
 async function enablePoolRuntime(ctx: ExtensionContext, account: Account) {
   const runtime = (ctx.modelRegistry as unknown as RuntimeModelRegistry).runtime
   if (!runtime?.setRuntimeApiKey) throw new Error("Esta versão do Pi não expõe o runtime necessário para alternar contas Codex")
-  await runtime.setRuntimeApiKey("openai-codex", account.accessToken, { signal: ctx.signal })
+  await runtime.setRuntimeApiKey(PROVIDER_ID, account.accessToken, { signal: ctx.signal })
+}
+
+function quotaWindowLabel(seconds: number | undefined, fallback: string) {
+  if (!seconds || seconds <= 0) return fallback
+  return seconds >= 86_400 ? `${Math.round(seconds / 86_400)}d` : `${Math.round(seconds / 3_600)}h`
+}
+function quotaResetText(resetAt: number | undefined) {
+  if (!resetAt || resetAt <= Date.now()) return ""
+  const totalMinutes = Math.max(0, Math.floor((resetAt - Date.now()) / 60_000))
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours >= 24) return `${Math.floor(hours / 24)}d${hours % 24}h`
+  return hours > 0 ? `${hours}h${minutes}m` : `${minutes}m`
+}
+function quotaPayload(account: Account) {
+  const windows = [
+    { window: account.quota?.primary, fallback: "5h" },
+    { window: account.quota?.secondary, fallback: "7d" },
+  ]
+  const items: Array<Record<string, unknown>> = []
+  const metrics: Record<string, number> = {}
+  const resetAt: Record<string, number> = {}
+  for (const { window, fallback } of windows) {
+    if (!window) continue
+    const label = quotaWindowLabel(window.windowSeconds, fallback)
+    items.push({ kind: "text", text: items.length === 0 ? `Usage: ${label} ` : ` / ${label} ` })
+    items.push({ kind: "pct", pct: window.usedPercent, metric: label })
+    const reset = quotaResetText(window.resetAt)
+    if (reset) items.push({ kind: "text", text: ` (${reset})` })
+    metrics[label] = window.usedPercent
+    if (window.resetAt) resetAt[label] = window.resetAt
+  }
+  if (account.quota?.planType ?? account.planType) {
+    items.push({ kind: "text", text: ` (${account.quota?.planType ?? account.planType})` })
+  }
+  if (items.length === 0) throw new Error("A conta ativa não retornou janelas de quota")
+  return {
+    kind: "quota" as const,
+    items,
+    metrics,
+    resetAt: Object.keys(resetAt).length ? resetAt : undefined,
+  }
+}
+
+type QuotaRequest = { requestId?: unknown; provider?: unknown; sessionId?: unknown; force?: unknown }
+function registerQuotaBridge(pi: ExtensionAPI) {
+  return pi.events.on(QUOTA_REQUEST_EVENT, (raw) => {
+    const request = raw as QuotaRequest
+    if (request?.provider !== PROVIDER_ID || typeof request.requestId !== "string" || typeof request.sessionId !== "string") return
+    void (async () => {
+      try {
+        const selected = await assignedAccountForSession(request.sessionId as string)
+        if (!selected || !selected.enabled) throw new Error("Nenhuma conta Codex ativa para esta sessão")
+        const account = await refreshIfNeeded(selected)
+        await quota.refresh(account, request.force === true)
+        const fresh = (await accounts()).accounts.find((item) => item.id === account.id) ?? account
+        pi.events.emit(QUOTA_RESPONSE_EVENT, {
+          requestId: request.requestId,
+          provider: PROVIDER_ID,
+          identityKey: fresh.id,
+          accountLabel: fresh.label,
+          payload: quotaPayload(fresh),
+        })
+      } catch (error) {
+        pi.events.emit(QUOTA_RESPONSE_EVENT, {
+          requestId: request.requestId,
+          provider: PROVIDER_ID,
+          error: failureMessage(error),
+        })
+      }
+    })()
+  })
 }
 
 async function addAccount(ctx: ExtensionContext) {
@@ -393,20 +479,34 @@ async function menu(ctx: ExtensionContext) {
 
 export default function (pi: ExtensionAPI) {
   let waitTimer: ReturnType<typeof setInterval> | undefined
+  extensionAPI = pi
+  const unregisterQuotaBridge = registerQuotaBridge(pi)
 
-  if (PROVIDERS.has("openai-codex")) {
-    pi.registerProvider("openai-codex", {
-      api: "openai-codex-responses",
-      // Adiciona autenticação por chave ao provider composto. O runtime recebe
-      // uma credencial transitória e o stream abaixo escolhe a conta por sessão.
-      apiKey: "codex-account-pool-runtime",
-      streamSimple: (model, context, options) => lazyStream(model, async () => streamWithAccountPool(
-        model as Model<"openai-codex-responses">,
-        context,
-        options,
-      )),
-    })
-  }
+  pi.registerProvider(PROVIDER_ID, {
+    name: "Codex Account Pool",
+    baseUrl: "https://chatgpt.com/backend-api",
+    api: "openai-codex-responses",
+    // Mantém o provider visível antes da primeira conta ser ativada. O stream
+    // sempre injeta a credencial da conta vinculada à sessão.
+    apiKey: "codex-account-pool-runtime",
+    models: Object.values(OPENAI_CODEX_MODELS).map((model) => ({
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      reasoning: model.reasoning,
+      thinkingLevelMap: model.thinkingLevelMap,
+      input: [...model.input],
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      compat: model.compat,
+    })),
+    streamSimple: (model, context, options) => lazyStream(model, async () => streamWithAccountPool(
+      model as Model<"openai-codex-responses">,
+      context,
+      options,
+    )),
+  })
 
   pi.on("session_start", async (_event, ctx) => {
     await store.initialize()
@@ -415,12 +515,13 @@ export default function (pi: ExtensionAPI) {
     sessionContexts.set(sessionId(ctx), ctx)
     const account = await usableAccount(ctx)
     if (account) {
+      await activateAccount(sessionId(ctx), account)
       try {
         await enablePoolRuntime(ctx, account)
       } catch (error) {
         if (ctx.hasUI) ctx.ui.notify(`O pool não pôde assumir a autenticação do Codex: ${failureMessage(error)}`, "error")
       }
-      if (ctx.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex: ${account.label}`)
+      if (ctx.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex Pool: ${account.label}`)
     }
     waitTimer = setInterval(() => void (async () => {
       const job = waiting[sessionId(ctx)]
@@ -441,6 +542,8 @@ export default function (pi: ExtensionAPI) {
     closeOpenAICodexWebSocketSessions(sessionId(ctx))
     sessionContexts.delete(sessionId(ctx))
     cancelBrowserAuthorization("Login cancelado porque a sessão foi encerrada ou recarregada")
+    extensionAPI = undefined
+    unregisterQuotaBridge()
   })
   pi.on("context", async (event, ctx) => {
     const pending = await getPendingHandoff(sessionId(ctx))

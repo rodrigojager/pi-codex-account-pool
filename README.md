@@ -1,11 +1,13 @@
 # pi-codex-account-pool
 
-Pool de contas ChatGPT Plus/Pro via OAuth para o provider `openai-codex` do Pi.
+Pool de contas ChatGPT Plus/Pro via OAuth exposto como provider próprio `codex-account-pool` no Pi.
 
 > Use somente contas e assinaturas que você está autorizado a usar. Tokens ficam locais em `~/.pi/agent/codex-account-pool/accounts.json`.
 
 ## Recursos
 
+- Provider separado `codex-account-pool`, sem sobrescrever `openai-codex`.
+- Catálogo oficial de modelos Codex, visível diretamente em `/model`.
 - Várias contas ChatGPT com login Browser OAuth ou Device Code.
 - Importação automática da conta OAuth já autenticada no Pi.
 - Conta sticky por sessão do Pi.
@@ -43,17 +45,17 @@ Quando uma conta Codex falha antes de começar a resposta, a extensão repete a 
 
 O summarizer é usado somente pelo comando manual `/codex-handoff`. Ele tenta o modelo principal e, se necessário, cada fallback configurado.
 
+Em `/model`, escolha entradas como `codex-account-pool/gpt-5.6-luna`. O provider original `openai-codex` continua disponível separadamente.
+
 No menu, adicione as contas e escolha **Usar nesta sessão**. O agente também pode usar:
 
 - `codex_accounts_list`
 - `codex_account_current`
 - `codex_account_set_active`
 
-Por segurança, a extensão só substitui o stream do provider `openai-codex`. A variável abaixo pode desativar essa substituição ao omitir `openai-codex`; outros providers não usam tokens ChatGPT e não são compatíveis com este pool:
+A extensão registra um provider independente e não altera autenticação, modelos ou streams de `openai`, `openai-codex`, OpenRouter, OpenCode ou outros providers.
 
-```bash
-PI_CODEX_ACCOUNT_POOL_PROVIDERS=openai-codex pi
-```
+Quando a versão `rodrigojager/pi-check-agent-quota` está instalada, as duas extensões usam o event bus do Pi para exibir a quota da conta realmente ativa. Tokens nunca são enviados pelo event bus; somente identidade local, rótulo e snapshot sanitizado de quota.
 
 Comandos adicionais:
 
@@ -87,4 +89,4 @@ pi -e ./src/index.ts
 
 ## Diferenças em relação ao plugin OpenCode
 
-O provider Codex monta os headers de autenticação depois dos hooks genéricos e o transporte WebSocket não emite todas as respostas HTTP para extensões. Por isso, esta extensão registra um wrapper do stream `openai-codex-responses`, injeta o token selecionado diretamente na chamada e controla o failover antes de qualquer conteúdo ser emitido. A seleção continua isolada por sessão e os tokens permanecem fora do contexto enviado ao modelo.
+O provider Codex monta os headers de autenticação depois dos hooks genéricos e o transporte WebSocket não emite todas as respostas HTTP para extensões. Por isso, o provider próprio `codex-account-pool` registra um wrapper do stream `openai-codex-responses`, injeta o token selecionado diretamente na chamada e controla o failover antes de qualquer conteúdo ser emitido. A seleção continua isolada por sessão e os tokens permanecem fora do contexto enviado ao modelo.
