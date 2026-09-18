@@ -12,6 +12,9 @@ Pool de contas ChatGPT Plus/Pro via OAuth para o provider `openai-codex` do Pi.
 - Rotação para outra conta após falhas 401/403/429/5xx.
 - Seleção de conta pelo TUI e ferramentas para o agente.
 - Estado separado por projeto/sessão, sem expor tokens ao modelo.
+- Summarizer configurável com qualquer provider/modelo disponível no Pi.
+- Lista de fallbacks para o summarizer; se o primary falhar, o próximo modelo é tentado.
+- Handoff automático quando o failover troca a conta Codex, além de handoff manual para uma nova sessão.
 
 ## Instalação
 
@@ -26,7 +29,13 @@ Depois reinicie o Pi ou execute `/reload`.
 ```text
 /codex-accounts
 /codex-account-add
+/codex-handoff-config
+/codex-handoff [próximo objetivo opcional]
 ```
+
+`/codex-handoff-config` lista todos os modelos autenticados/configurados no Pi. Escolha um modelo primary e informe fallbacks no formato `provider/model,provider/model`. Esses modelos podem ser de providers diferentes (OpenAI, Anthropic, Google, OpenRouter etc.).
+
+Quando uma conta Codex falha e outra é selecionada, o plugin gera um resumo usando o primary e tenta cada fallback configurado. O handoff pendente é injetado no próximo request sem apagar o histórico da sessão.
 
 No menu, adicione as contas e escolha **Usar nesta sessão**. O agente também pode usar:
 

@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { AccountStore, type Account } from "./store"
 import { browserAuthorization, deviceAuthorization, tokenIdentity, refreshTokens } from "./oauth"
 import { paths } from "./storage"
+import { clearPendingHandoff, completeWithFailover, createHandoff, getPendingHandoff, handoffContextMessage, loadHandoffSettings, saveHandoffSettings, type ModelRef } from "./handoff"
 
 const exec = promisify(execFile)
 const PROVIDERS = new Set((process.env.PI_CODEX_ACCOUNT_POOL_PROVIDERS ?? "openai-codex").split(",").map((x) => x.trim()).filter(Boolean))
@@ -115,13 +116,55 @@ export default function (pi: ExtensionAPI) {
     if (fresh.workspaceAccountID) event.headers["ChatGPT-Account-Id"] = fresh.workspaceAccountID
     if (ctx.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex: ${fresh.label}`)
   })
+  pi.on("context", async (event, ctx) => {
+    const pending = await getPendingHandoff(sessionId(ctx))
+    if (!pending) return
+    await clearPendingHandoff(sessionId(ctx))
+    return { messages: [handoffContextMessage(pending), ...event.messages] }
+  })
   pi.on("after_provider_response", async (event, ctx) => {
     if (!ctx.model || !PROVIDERS.has(ctx.model.provider)) return
+    await loadBindings()
+    const previousID = bindings[sessionId(ctx)]
+    const previous = (await accounts()).accounts.find((a) => a.id === previousID)
     const account = await usableAccount(ctx)
     if (!account) return
     if (event.status >= 200 && event.status < 400) await store.recordOutcome(account.id, event.status, true)
-    else if ([401, 403, 429].includes(event.status) || event.status >= 500) await store.recordOutcome(account.id, event.status, false, Date.now() + (event.status === 429 ? 30_000 : 300_000))
+    else if ([401, 403, 429].includes(event.status) || event.status >= 500) {
+      await store.recordOutcome(account.id, event.status, false, Date.now() + (event.status === 429 ? 30_000 : 300_000))
+      const next = await usableAccount(ctx)
+      if (previous && next && next.id !== previous.id) {
+        try {
+          await createHandoff(ctx, previous.id, next.id, `falha ${event.status} da conta ${previous.label}`)
+          bindings[sessionId(ctx)] = next.id
+          await saveBindings()
+          if (ctx.hasUI) ctx.ui.notify(`Failover Codex: handoff preparado para ${next.label}`, "warning")
+        } catch (error) {
+          if (ctx.hasUI) ctx.ui.notify(`Failover sem summarizer: ${error instanceof Error ? error.message : String(error)}`, "warning")
+        }
+      }
+    }
   })
+  pi.registerCommand("codex-handoff-config", { description: "Configurar modelos primary/fallback do summarizer", handler: async (_args, ctx) => {
+    if (!ctx.hasUI) return
+    const available = ctx.modelRegistry.getAvailable()
+    const refs = available.map((model) => `${model.provider}/${model.id}` as ModelRef)
+    const current = await loadHandoffSettings()
+    const primary = await ctx.ui.select("Modelo primary do summarizer", ["Desativado", ...refs])
+    if (!primary) return
+    const fallbackText = await ctx.ui.input("Fallbacks (provider/model separados por vírgula)", current.fallbacks.join(","))
+    const valid = (fallbackText ?? "").split(",").map((x) => x.trim()).filter((x) => refs.includes(x as ModelRef)) as ModelRef[]
+    await saveHandoffSettings({ primary: primary === "Desativado" ? undefined : primary as ModelRef, fallbacks: valid, maxInputChars: current.maxInputChars })
+    ctx.ui.notify(`Summarizer salvo: ${primary === "Desativado" ? "modelo atual + fallbacks" : primary}`, "info")
+  } })
+  pi.registerCommand("codex-handoff", { description: "Gerar handoff e abrir uma nova sessão", handler: async (args, ctx) => {
+    if (!ctx.hasUI) return
+    const result = await createHandoff(ctx, undefined, undefined, args.trim() || "handoff manual")
+    if (!result) return ctx.ui.notify("Não há conversa para transferir.", "warning")
+    const prompt = `${result.text}${args.trim() ? `\\n\\n## Próximo objetivo\\n${args.trim()}` : ""}`
+    const replacement = await ctx.newSession({ parentSession: ctx.sessionManager.getSessionFile(), withSession: async (next) => { next.ui.setEditorText(prompt); next.ui.notify(`Handoff gerado com ${result.model}. Revise e envie.`, "info") } })
+    if (replacement.cancelled) ctx.ui.notify("Handoff cancelado.", "info")
+  } })
   pi.registerCommand("codex-accounts", { description: "Gerenciar contas ChatGPT Codex", handler: async (_args, ctx) => menu(ctx) })
   pi.registerCommand("codex-account-add", { description: "Adicionar uma conta ChatGPT Codex", handler: async (_args, ctx) => addAccount(ctx) })
   pi.registerTool({ name: "codex_accounts_list", label: "Codex accounts", description: "List configured Codex accounts without credentials", parameters: Type.Object({}), async execute() { const data = await accounts(); return { content: [{ type: "text", text: JSON.stringify(data.accounts.map(publicAccount), null, 2) }], details: {} } } })
