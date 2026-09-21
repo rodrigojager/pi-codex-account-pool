@@ -33,6 +33,25 @@ pi install git:github.com/rodrigojager/pi-codex-account-pool
 
 Depois reinicie o Pi ou execute `/reload`.
 
+## Compatibilidade com o Pi
+
+O pool usa o transporte, o catálogo e a normalização de contexto fornecidos pelo
+Pi em execução, através da API pública disponibilizada às extensões. Não seleciona
+o comportamento pelo número da versão e não importa uma cópia privada dos módulos
+internos de transporte. As dependências Pi de desenvolvimento servem aos testes;
+em produção, o host fornece essas APIs.
+
+São aceitos tanto `systemPrompt`/`tools` quanto mensagens de sistema com
+`sections`, `toolsAdded` e `toolsRemoved`. Instruções e ferramentas também são
+preservadas quando o handoff encurta o histórico. O transporte do host mantém as
+atualizações de sistema no decorrer da conversa quando o modelo as suporta.
+
+A matriz de regressão cobre Pi 0.85.1 e 0.86.1 com captura offline do payload real,
+sem credenciais ou chamadas de rede. Atualizações que preservem essas capacidades
+públicas não exigem uma nova regra por versão. Uma futura quebra da API do Pi ou
+do protocolo do serviço poderá exigir adaptação; capacidades obrigatórias ausentes
+produzem um erro explícito ao carregar a extensão.
+
 ## Uso
 
 ```text

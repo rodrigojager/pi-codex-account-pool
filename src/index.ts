@@ -8,9 +8,8 @@ import { Type } from "typebox"
 import { z } from "zod"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import type { AssistantMessage, AssistantMessageEvent, Context, Model, ProviderResponse, SimpleStreamOptions } from "@earendil-works/pi-ai"
-import { lazyStream } from "@earendil-works/pi-ai/api/lazy"
-import { closeOpenAICodexWebSocketSessions, streamSimple as streamCodex } from "@earendil-works/pi-ai/api/openai-codex-responses"
-import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models"
+import * as piAI from "@earendil-works/pi-ai/compat"
+import { createCodexRuntime, handoffMessages } from "./pi-runtime"
 import { AccountStore, type Account } from "./store"
 import { browserAuthorization, cancelBrowserAuthorization, deviceAuthorization, tokenIdentity, refreshTokens } from "./oauth"
 import { paths, transact } from "./storage"
@@ -20,6 +19,7 @@ import { orderAccounts, rotateAccounts } from "./bindings"
 import { cooldownUntil, failureMessage, failureStatus, shouldRotateAccount } from "./failover"
 
 const PROVIDER_ID = "codex-account-pool"
+const codexRuntime = createCodexRuntime(piAI)
 const QUOTA_REQUEST_EVENT = "pi-quota:request"
 const QUOTA_RESPONSE_EVENT = "pi-quota:response"
 const ACCOUNT_CHANGED_EVENT = "codex-account-pool:account-changed"
@@ -65,7 +65,7 @@ function validStoredModel(value: unknown): value is Model<any> {
 }
 async function refreshedCodexModelConfigs() {
   const byID = new Map<string, Model<any>>()
-  for (const model of Object.values(OPENAI_CODEX_MODELS)) byID.set(model.id, model)
+  for (const model of codexRuntime.models()) byID.set(model.id, model)
   try {
     const agentDir = process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent")
     const raw = JSON.parse(await readFile(join(agentDir, "models-store.json"), "utf8")) as Record<string, any>
@@ -260,7 +260,7 @@ async function* streamWithAccountPool(
 ): AsyncGenerator<AssistantMessageEvent> {
   const data = await accounts()
   if (!data.accounts.length) {
-    yield* streamCodex(model, context, options)
+    yield* codexRuntime.streamSimple(model, context, options)
     return
   }
 
@@ -297,12 +297,12 @@ async function* streamWithAccountPool(
     if (ctx?.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex Pool: ${account.label}`)
 
     let response: ProviderResponse | undefined
-    const source = streamCodex(model, context, {
+    const source = codexRuntime.streamSimple(model, context, {
       ...options,
       apiKey: account.accessToken,
       // O retry precisa voltar ao pool. O retry interno reutiliza o mesmo token.
       maxRetries: 0,
-      onResponse: async (value, responseModel) => {
+      onResponse: async (value: ProviderResponse, responseModel: Model<any>) => {
         response = value
         await options.onResponse?.(value, responseModel)
       },
@@ -557,11 +557,11 @@ export default function (pi: ExtensionAPI) {
     apiKey: "codex-account-pool-runtime",
     // Bootstrap offline com o catálogo embarcado; em cada refresh do Pi,
     // espelha o catálogo efetivo de openai-codex (inclusive models-store).
-    models: Object.values(OPENAI_CODEX_MODELS).map(poolModelConfig),
+    models: codexRuntime.models().map(poolModelConfig),
     async refreshModels() {
       return refreshedCodexModelConfigs()
     },
-    streamSimple: (model, context, options) => lazyStream(model, async () => streamWithAccountPool(
+    streamSimple: (model, context, options) => codexRuntime.lazyStream(model, async () => streamWithAccountPool(
       model as Model<"openai-codex-responses">,
       context,
       options,
@@ -601,7 +601,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     if (waitTimer) clearInterval(waitTimer)
     waitTimer = undefined
-    closeOpenAICodexWebSocketSessions(sessionId(ctx))
+    codexRuntime.cleanupSession(sessionId(ctx))
     sessionContexts.delete(sessionId(ctx))
     cancelBrowserAuthorization("Login cancelado porque a sessão foi encerrada ou recarregada")
     extensionAPI = undefined
@@ -614,7 +614,7 @@ export default function (pi: ExtensionAPI) {
     await clearPendingHandoff(sessionId(ctx))
     // After a handoff, keep the checkpoint and a short recent tail instead of
     // resending the whole pre-failover transcript.
-    return { messages: [handoffContextMessage(pending), ...event.messages.slice(-8)] }
+    return { messages: handoffMessages(event.messages, handoffContextMessage(pending), piAI) }
   })
   pi.registerCommand("codex-handoff-config", { description: "Configurar modelos primary/fallback do summarizer", handler: async (_args, ctx) => {
     if (!ctx.hasUI) return
