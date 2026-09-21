@@ -81,6 +81,21 @@ A extensão registra um provider independente e não altera autenticação, mode
 
 Quando a versão `rodrigojager/pi-check-agent-quota` está instalada, as duas extensões usam o event bus do Pi para exibir a quota da conta realmente ativa. Tokens nunca são enviados pelo event bus; somente identidade local, rótulo e snapshot sanitizado de quota.
 
+### Usage ao vivo
+
+Atualize **os dois forks** (`pi-codex-account-pool` e `pi-check-agent-quota`). A barra recebe imediatamente cada nova leitura do pool, inclusive refresh manual e erro 429. Enquanto o provider do pool estiver selecionado, consulta a conta ativa aproximadamente a cada **15 segundos durante execução** e **60 segundos em repouso**, sem precisar de `/aqauto`. Também consulta ao terminar cada turno com ferramentas e força uma leitura ao encerrar a tarefa.
+
+O cache do pool dura 15 segundos e requisições simultâneas para a mesma conta são agrupadas. O horário exibido é o da leitura original, não o da reutilização do cache. Uma resposta atrasada da conta anterior não pode substituir a conta ativa. Falhas de consulta ficam visíveis também durante execução; a atualização ainda depende da rede e da disponibilidade/atualização do endpoint do ChatGPT.
+
+`Usage` indica a porcentagem **usada** (100% usada = 0% restante). `/checkaq` força uma consulta imediata.
+
+```bash
+pi update https://github.com/rodrigojager/pi-codex-account-pool
+pi update https://github.com/rodrigojager/pi-check-agent-quota
+```
+
+Depois execute `/reload`.
+
 Comandos adicionais:
 
 ```text

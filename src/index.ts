@@ -22,6 +22,7 @@ const PROVIDER_ID = "codex-account-pool"
 const codexRuntime = createCodexRuntime(piAI)
 const QUOTA_REQUEST_EVENT = "pi-quota:request"
 const QUOTA_RESPONSE_EVENT = "pi-quota:response"
+const QUOTA_UPDATED_EVENT = "pi-quota:updated"
 const ACCOUNT_CHANGED_EVENT = "codex-account-pool:account-changed"
 const store = new AccountStore()
 const quota = new QuotaService(store)
@@ -319,6 +320,7 @@ async function* streamWithAccountPool(
           const message = failureMessage(event.error)
           const status = failureStatus(response, message)
           await store.recordOutcome(account.id, status ?? 520, false, cooldownUntil(status, response))
+          if (status === 429) void quota.refresh(account, true).catch(() => {})
           yield event
           return
         }
@@ -422,7 +424,17 @@ function quotaPayload(account: Account) {
 
 type QuotaRequest = { requestId?: unknown; provider?: unknown; sessionId?: unknown; force?: unknown }
 function registerQuotaBridge(pi: ExtensionAPI) {
-  return pi.events.on(QUOTA_REQUEST_EVENT, (raw) => {
+  const stopUpdates = quota.onUpdate((account, snapshot) => {
+    // Whitelist metadata: OAuth credentials must never cross the event bus.
+    pi.events.emit(QUOTA_UPDATED_EVENT, {
+      provider: PROVIDER_ID,
+      identityKey: account.id,
+      accountLabel: account.label,
+      fetchedAt: snapshot.fetchedAt,
+      payload: quotaPayload({ ...account, quota: snapshot }),
+    })
+  })
+  const stopRequests = pi.events.on(QUOTA_REQUEST_EVENT, (raw) => {
     const request = raw as QuotaRequest
     if (request?.provider !== PROVIDER_ID || typeof request.requestId !== "string" || typeof request.sessionId !== "string") return
     void (async () => {
@@ -437,6 +449,7 @@ function registerQuotaBridge(pi: ExtensionAPI) {
           provider: PROVIDER_ID,
           identityKey: fresh.id,
           accountLabel: fresh.label,
+          fetchedAt: fresh.quota?.fetchedAt,
           payload: quotaPayload(fresh),
         })
       } catch (error) {
@@ -448,6 +461,7 @@ function registerQuotaBridge(pi: ExtensionAPI) {
       }
     })()
   })
+  return () => { stopRequests(); stopUpdates() }
 }
 
 async function addAccount(ctx: ExtensionContext) {

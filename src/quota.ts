@@ -1,5 +1,7 @@
 import type { Account, AccountQuota, QuotaWindow } from "./domain"
-import { AccountStore } from "./store"
+import type { AccountStore } from "./store"
+
+export const QUOTA_CACHE_MS = 15_000
 
 function number(value: unknown) {
   const parsed = typeof value === "string" ? Number(value) : value
@@ -66,11 +68,21 @@ export function headroom(account: Account) {
 
 export class QuotaService {
   private inflight = new Map<string, Promise<AccountQuota>>()
+  private listeners = new Set<(account: Account, quota: AccountQuota) => void>()
   constructor(private accounts: AccountStore, private fetchFn: typeof fetch = fetch) {}
 
+  onUpdate(listener: (account: Account, quota: AccountQuota) => void) {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
   async refresh(account: Account, force = false) {
-    if (!force && account.quota && Date.now() - account.quota.fetchedAt < 60_000) return account.quota
+    // Streams retain an old Account object. Read the latest persisted snapshot
+    // before checking TTL, including updates made by another Pi process.
+    account = (await this.accounts.snapshot()).accounts.find((item) => item.id === account.id) ?? account
     let pending = this.inflight.get(account.id)
+    if (pending) return pending
+    if (!force && account.quota && Date.now() - account.quota.fetchedAt < QUOTA_CACHE_MS) return account.quota
     if (!pending) {
       pending = this.fetchFn(process.env.PI_CODEX_QUOTA_ENDPOINT ?? "https://chatgpt.com/backend-api/wham/usage", {
         headers: {
@@ -83,7 +95,11 @@ export class QuotaService {
       }).then(async (response) => {
         if (!response.ok) throw new Error(`Quota request failed: ${response.status}`)
         const quota = parseQuotaPayload(await response.json())
-        await this.accounts.updateQuota(account.id, quota)
+        if (await this.accounts.updateQuota(account.id, quota)) {
+          for (const listener of this.listeners) {
+            try { listener(account, quota) } catch { /* UI listeners cannot fail the quota refresh. */ }
+          }
+        }
         return quota
       }).finally(() => this.inflight.delete(account.id))
       this.inflight.set(account.id, pending)
