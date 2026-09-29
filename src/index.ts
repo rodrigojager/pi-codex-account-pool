@@ -4,6 +4,9 @@ import { pickHandoffModel } from "./model-picker"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { readFile } from "node:fs/promises"
+import { watch, type FSWatcher } from "node:fs"
+import { dirname, basename } from "node:path"
+import { codexCachePath, officialCatalogPath, OFFICIAL_CATALOG_TTL_MS, DEFAULT_CODEX_CLIENT_VERSION, fetchOfficialCodexCatalog, poolModelConfig, refreshedCodexModelConfigs } from "./codex-models"
 import { Type } from "typebox"
 import { z } from "zod"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
@@ -12,7 +15,7 @@ import * as piAI from "@earendil-works/pi-ai/compat"
 import { createCodexRuntime, handoffMessages } from "./pi-runtime"
 import { AccountStore, type Account } from "./store"
 import { browserAuthorization, cancelBrowserAuthorization, deviceAuthorization, tokenIdentity, refreshTokens } from "./oauth"
-import { paths, transact } from "./storage"
+import { atomicWrite, paths, transact } from "./storage"
 import { QuotaService, blockedUntil, nearLimit } from "./quota"
 import { addHandoffNote, clearPendingHandoff, completeWithFailover, createHandoff, getPendingHandoff, handoffContextMessage, loadHandoffSettings, saveHandoffSettings, type HandoffModelOptions, type ModelRef } from "./handoff"
 import { orderAccounts, rotateAccounts } from "./bindings"
@@ -40,43 +43,8 @@ const sessionContexts = new Map<string, ExtensionContext>()
 let extensionAPI: ExtensionAPI | undefined
 let sourceModelRegistry: ExtensionContext["modelRegistry"] | undefined
 
-function poolModelConfig(model: Model<any>) {
-  return {
-    id: model.id,
-    name: model.name,
-    api: model.api,
-    reasoning: model.reasoning,
-    thinkingLevelMap: model.thinkingLevelMap,
-    input: [...model.input],
-    cost: model.cost,
-    contextWindow: model.contextWindow,
-    maxTokens: model.maxTokens,
-    compat: model.compat,
-  }
-}
 function currentCodexModels() {
   return sourceModelRegistry?.getAll().filter((model) => model.provider === "openai-codex") ?? []
-}
-function validStoredModel(value: unknown): value is Model<any> {
-  if (!value || typeof value !== "object") return false
-  const model = value as Partial<Model<any>>
-  return typeof model.id === "string" && typeof model.name === "string" && typeof model.api === "string" &&
-    typeof model.reasoning === "boolean" && Array.isArray(model.input) && typeof model.contextWindow === "number" &&
-    typeof model.maxTokens === "number" && !!model.cost && typeof model.cost === "object"
-}
-async function refreshedCodexModelConfigs() {
-  const byID = new Map<string, Model<any>>()
-  for (const model of codexRuntime.models()) byID.set(model.id, model)
-  try {
-    const agentDir = process.env.PI_AGENT_DIR ?? join(homedir(), ".pi", "agent")
-    const raw = JSON.parse(await readFile(join(agentDir, "models-store.json"), "utf8")) as Record<string, any>
-    const stored = raw["openai-codex"]?.models
-    if (Array.isArray(stored)) for (const model of stored) if (validStoredModel(model)) byID.set(model.id, model)
-  } catch {
-    // O catálogo embarcado mantém o provider disponível offline.
-  }
-  for (const model of currentCodexModels()) byID.set(model.id, model)
-  return [...byID.values()].map(poolModelConfig)
 }
 
 async function loadBindings() {
@@ -191,6 +159,48 @@ async function removeAccount(accountID: string) {
   }
   return true
 }
+async function refreshOfficialModels(ctx: ExtensionContext, force = false) {
+  if (process.env.PI_OFFLINE !== undefined) return "offline"
+  const enabled = (await accounts()).accounts.filter((account) => account.enabled)
+  if (!enabled.length) return "sem contas habilitadas"
+  const accountIDs = enabled.map((account) => account.id).sort()
+  if (!force) {
+    try {
+      const cached = JSON.parse(await readFile(officialCatalogPath(), "utf8")) as { checkedAt?: number; models?: unknown; accountIDs?: string[] }
+      if (Array.isArray(cached.models) && JSON.stringify(cached.accountIDs) === JSON.stringify(accountIDs) &&
+        typeof cached.checkedAt === "number" && Date.now() - cached.checkedAt < OFFICIAL_CATALOG_TTL_MS) return "cache"
+    } catch { /* Fetch if no valid cache exists. */ }
+  }
+  let clientVersion = process.env.PI_CODEX_MODEL_CLIENT_VERSION ?? DEFAULT_CODEX_CLIENT_VERSION
+  if (!process.env.PI_CODEX_MODEL_CLIENT_VERSION) {
+    try {
+      const cache = JSON.parse(await readFile(codexCachePath(), "utf8")) as { client_version?: unknown }
+      if (typeof cache.client_version === "string") clientVersion = cache.client_version
+    } catch { /* CLI installation is optional. */ }
+  }
+  // Model availability differs by plan/workspace. Combine only catalogs from
+  // the authenticated accounts; a failed account must not discard a good one.
+  const catalogs = await Promise.allSettled(enabled.map(async (account) => {
+    const fresh = await refreshIfNeeded(account)
+    return fetchOfficialCodexCatalog(fresh.accessToken, fresh.workspaceAccountID, clientVersion)
+  }))
+  const models = new Map<string, Record<string, unknown>>()
+  for (const result of catalogs) if (result.status === "fulfilled") {
+    for (const model of result.value.models) if (typeof model.slug === "string") models.set(model.slug, model)
+  }
+  if (!catalogs.some((result) => result.status === "fulfilled")) throw new Error("Nenhuma conta retornou o catálogo de modelos")
+  const complete = catalogs.every((result) => result.status === "fulfilled")
+  if (!complete) {
+    try {
+      const previous = JSON.parse(await readFile(officialCatalogPath(), "utf8")) as { models?: Array<{ slug?: unknown }> }
+      for (const model of previous.models ?? []) if (typeof model.slug === "string" && !models.has(model.slug)) models.set(model.slug, model)
+    } catch { /* Nothing to preserve on the first refresh. */ }
+  }
+  await atomicWrite(officialCatalogPath(), { checkedAt: complete ? Date.now() : 0, accountIDs, models: [...models.values()] })
+  await ctx.modelRegistry.refresh({ allowNetwork: false, providers: [PROVIDER_ID], signal: ctx.signal })
+  return `${models.size} modelos visíveis no catálogo oficial Codex (${catalogs.filter((result) => result.status === "fulfilled").length}/${enabled.length} contas)`
+}
+
 async function refreshIfNeeded(account: Account) {
   if (account.expiresAt > Date.now() + 30_000) return account
   let pending = tokenRefreshes.get(account.id)
@@ -559,6 +569,8 @@ async function menu(ctx: ExtensionContext) {
 
 export default function (pi: ExtensionAPI) {
   let waitTimer: ReturnType<typeof setInterval> | undefined
+  let modelWatcher: FSWatcher | undefined
+  let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined
   extensionAPI = pi
   const unregisterQuotaBridge = registerQuotaBridge(pi)
 
@@ -573,7 +585,7 @@ export default function (pi: ExtensionAPI) {
     // espelha o catálogo efetivo de openai-codex (inclusive models-store).
     models: codexRuntime.models().map(poolModelConfig),
     async refreshModels() {
-      return refreshedCodexModelConfigs()
+      return refreshedCodexModelConfigs(codexRuntime.models(), currentCodexModels())
     },
     streamSimple: (model, context, options) => codexRuntime.lazyStream(model, async () => streamWithAccountPool(
       model as Model<"openai-codex-responses">,
@@ -585,12 +597,25 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     sourceModelRegistry = ctx.modelRegistry
     await ctx.modelRegistry.refresh({ allowNetwork: false, providers: [PROVIDER_ID], signal: ctx.signal })
+    // Codex CLI atomically replaces its cache; watch the directory, not the file inode.
+    try {
+      modelWatcher = watch(dirname(codexCachePath()), (_event, file) => {
+        if (file && String(file) !== basename(codexCachePath())) return
+        if (modelRefreshTimer) clearTimeout(modelRefreshTimer)
+        modelRefreshTimer = setTimeout(() => {
+          void ctx.modelRegistry.refresh({ allowNetwork: false, providers: [PROVIDER_ID] }).catch(() => {})
+        }, 500)
+        modelRefreshTimer.unref?.()
+      })
+      modelWatcher.on("error", () => { modelWatcher?.close(); modelWatcher = undefined })
+    } catch { /* Cache not available; startup refresh still works. */ }
     await store.initialize()
     await importPiCodexAuth()
     await loadWaiting()
     sessionContexts.set(sessionId(ctx), ctx)
     const account = await usableAccount(ctx)
     if (account) {
+      await refreshOfficialModels(ctx).catch(() => { /* Cached catalogs remain available offline. */ })
       await activateAccount(sessionId(ctx), account)
       try {
         await enablePoolRuntime(ctx, account)
@@ -615,6 +640,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     if (waitTimer) clearInterval(waitTimer)
     waitTimer = undefined
+    if (modelRefreshTimer) clearTimeout(modelRefreshTimer)
+    modelRefreshTimer = undefined
+    modelWatcher?.close()
+    modelWatcher = undefined
     codexRuntime.cleanupSession(sessionId(ctx))
     sessionContexts.delete(sessionId(ctx))
     cancelBrowserAuthorization("Login cancelado porque a sessão foi encerrada ou recarregada")
@@ -630,6 +659,12 @@ export default function (pi: ExtensionAPI) {
     // resending the whole pre-failover transcript.
     return { messages: handoffMessages(event.messages, handoffContextMessage(pending), piAI) }
   })
+  pi.registerCommand("codex-pool-models-refresh", { description: "Consultar catálogo oficial Codex com a conta do pool", handler: async (_args, ctx) => {
+    const account = await usableAccount(ctx)
+    if (!account) { ctx.ui.notify("Nenhuma conta Codex ativa para consultar o catálogo oficial.", "warning"); return }
+    try { ctx.ui.notify(await refreshOfficialModels(ctx, true), "info") }
+    catch (error) { ctx.ui.notify(`Não foi possível atualizar o catálogo oficial: ${failureMessage(error)}`, "warning") }
+  } })
   pi.registerCommand("codex-handoff-config", { description: "Configurar modelos primary/fallback do summarizer", handler: async (_args, ctx) => {
     if (!ctx.hasUI) return
     const available = ctx.modelRegistry.getAvailable()

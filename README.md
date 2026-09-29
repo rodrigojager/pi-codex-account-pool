@@ -8,7 +8,7 @@ Pool de contas ChatGPT Plus/Pro via OAuth exposto como provider próprio `codex-
 
 - Provider separado `codex-account-pool`, sem sobrescrever `openai-codex`.
 - Catálogo oficial e dinâmico de modelos Codex, visível diretamente em `/model`.
-- Espelhamento do catálogo efetivo de `openai-codex` e do `models-store.json`, com fallback offline embarcado.
+- Catálogo aditivo de três fontes independentes: modelos do Pi (`openai-codex` e `models-store.json`), cache local do Codex CLI (`$CODEX_HOME/models_cache.json` ou `~/.codex/models_cache.json`) e catálogo oficial Codex por conta autenticada (`chatgpt.com/backend-api/codex/models`). O catálogo oficial é consultado ao iniciar (TTL de 4 horas) e manualmente com `/codex-pool-models-refresh`; o cache do CLI é relido quando muda. Só modelos visíveis e compatíveis com a API são adicionados. A disponibilidade efetiva depende da conta autenticada.
 - Várias contas ChatGPT com login Browser OAuth ou Device Code.
 - Importação automática da conta OAuth já autenticada no Pi.
 - Conta sticky por sessão do Pi.
@@ -69,7 +69,7 @@ Quando uma conta Codex falha antes de começar a resposta, a extensão repete a 
 
 O summarizer é usado somente pelo comando manual `/codex-handoff`. Ele tenta o modelo principal e, se necessário, cada fallback configurado.
 
-Em `/model`, escolha entradas como `codex-account-pool/gpt-5.6-luna`. O provider original `openai-codex` continua disponível separadamente.
+Em `/model`, escolha entradas como `codex-account-pool/gpt-6.1-sol`. O provider original `openai-codex` continua disponível separadamente. O Codex CLI é opcional: o pool consulta diretamente, com o OAuth das contas já cadastradas, o catálogo do backend usado pelo cliente oficial. Só metadados públicos dos modelos são salvos em `~/.pi/agent/codex-account-pool/official-models.json`; nenhum token é salvo nesse arquivo. Se o endpoint falhar, mantém o catálogo anterior. O backend filtra por versão do cliente; sem CLI usa `0.159.0` como versão-base, ajustável por `PI_CODEX_MODEL_CLIENT_VERSION`. `GET https://api.openai.com/v1/models` usa uma **chave de API separada** e lista modelos de API, que não são necessariamente aceitos pelo Codex/ChatGPT; não são misturados ao pool.
 
 No menu, adicione as contas e escolha **Usar nesta sessão**. O agente também pode usar:
 
