@@ -69,6 +69,11 @@ test("concurrent requests are coalesced per account, failed refreshes never rene
 })
 
 test("bridge pushes sanitized updates and preserves source fetchedAt on cached responses", async () => {
+  const statusSource = await readFile(new URL("../src/pool-status.ts", import.meta.url), "utf8")
+  const statusCode = ts.transpileModule(statusSource, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+  }).outputText
+  const poolStatus = await import(`data:text/javascript;base64,${Buffer.from(statusCode).toString("base64")}`)
   const require = createRequire(import.meta.url)
   const entry = await readFile(new URL("../src/index.ts", import.meta.url), "utf8")
   const compiled = ts.transpileModule(entry + "\nexport { registerQuotaBridge, quota };", {
@@ -83,6 +88,7 @@ test("bridge pushes sanitized updates and preserves source fetchedAt on cached r
       if (name === "./quota") return { QuotaService: class extends QuotaService { constructor(store) { super(store, async () => Response.json(payload(used))) } } }
       if (name === "./pi-runtime") return { createCodexRuntime: () => ({}) }
       if (name === "./storage") return { paths: { root: "offline" } }
+      if (name === "./pool-status") return poolStatus
       if (name === "node:fs/promises") return { readFile: async () => "{}" }
       if (name.startsWith("./") || name === "@earendil-works/pi-ai/compat") return {}
       return require(name)

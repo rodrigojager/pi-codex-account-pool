@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3 - 2026-10-03
+
+- Exibe `Codex Pool: <conta>` somente quando o modelo atual usa `codex-account-pool`.
+- Limpa o status ao trocar de provider e restaura a conta da sessão ao voltar ao pool.
+- Impede que ativação, rotação ou leitura atrasada de conta exibam o status em outro provider.
+- Adiciona regressões para troca de modelo, ausência de conta/modelo e sessões sem UI.
+
 ## 0.2.1 - 2026-09-21
 
 - Usa transporte Codex, catálogo, normalizador e limpeza de sessão do Pi host,

@@ -1,13 +1,27 @@
 {
   "name": "pi-codex-account-pool",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Multi-account ChatGPT OAuth pool for Pi Codex sessions",
   "type": "module",
-  "keywords": ["pi-package", "pi", "codex", "openai", "oauth", "multi-account"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "codex",
+    "openai",
+    "oauth",
+    "multi-account"
+  ],
   "license": "MIT",
   "repository": "github:rodrigojager/pi-codex-account-pool",
-  "pi": { "extensions": ["./src/index.ts"] },
-  "scripts": { "typecheck": "tsc --noEmit", "test": "tsc --noEmit && node --test tests/*.test.mjs" },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit && node --test tests/*.test.mjs"
+  },
   "dependencies": {
     "zod": "^4.1.11"
   },
@@ -18,9 +32,15 @@
     "typebox": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-ai": { "optional": true },
-    "@earendil-works/pi-coding-agent": { "optional": true },
-    "@earendil-works/pi-tui": { "optional": true }
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.85.1",

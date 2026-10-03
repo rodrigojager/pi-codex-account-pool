@@ -20,8 +20,8 @@ import { QuotaService, blockedUntil, nearLimit } from "./quota"
 import { addHandoffNote, clearPendingHandoff, completeWithFailover, createHandoff, getPendingHandoff, handoffContextMessage, loadHandoffSettings, saveHandoffSettings, type HandoffModelOptions, type ModelRef } from "./handoff"
 import { orderAccounts, rotateAccounts } from "./bindings"
 import { cooldownUntil, failureMessage, failureStatus, shouldRotateAccount } from "./failover"
+import { POOL_PROVIDER_ID as PROVIDER_ID, setPoolStatus, registerPoolStatus } from "./pool-status"
 
-const PROVIDER_ID = "codex-account-pool"
 const codexRuntime = createCodexRuntime(piAI)
 const QUOTA_REQUEST_EVENT = "pi-quota:request"
 const QUOTA_RESPONSE_EVENT = "pi-quota:response"
@@ -140,7 +140,7 @@ async function activateAccount(sessionID: string, account: Account, clearHandoff
   if (waiting[sessionID]) await updateWaiting((data) => { delete data[sessionID] })
   if (clearHandoff) await clearPendingHandoff(sessionID)
   const ctx = sessionContexts.get(sessionID)
-  if (ctx?.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex Pool: ${account.label}`)
+  setPoolStatus(ctx, account.label)
   extensionAPI?.events.emit(ACCOUNT_CHANGED_EVENT, {
     provider: PROVIDER_ID,
     sessionId: sessionID,
@@ -305,7 +305,7 @@ async function* streamWithAccountPool(
 
     if (managedSession && bindings[sessionID] !== account.id) await activateAccount(sessionID, account)
     const ctx = sessionContexts.get(sessionID)
-    if (ctx?.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex Pool: ${account.label}`)
+    setPoolStatus(ctx, account.label)
 
     let response: ProviderResponse | undefined
     const source = codexRuntime.streamSimple(model, context, {
@@ -573,6 +573,7 @@ export default function (pi: ExtensionAPI) {
   let modelRefreshTimer: ReturnType<typeof setTimeout> | undefined
   extensionAPI = pi
   const unregisterQuotaBridge = registerQuotaBridge(pi)
+  registerPoolStatus(pi, async (ctx) => (await assignedAccount(ctx) ?? await usableAccount(ctx))?.label)
 
   pi.registerProvider(PROVIDER_ID, {
     name: "Codex Account Pool",
@@ -595,6 +596,7 @@ export default function (pi: ExtensionAPI) {
   })
 
   pi.on("session_start", async (_event, ctx) => {
+    setPoolStatus(ctx)
     sourceModelRegistry = ctx.modelRegistry
     await ctx.modelRegistry.refresh({ allowNetwork: false, providers: [PROVIDER_ID], signal: ctx.signal })
     // Codex CLI atomically replaces its cache; watch the directory, not the file inode.
@@ -622,7 +624,7 @@ export default function (pi: ExtensionAPI) {
       } catch (error) {
         if (ctx.hasUI) ctx.ui.notify(`O pool não pôde assumir a autenticação do Codex: ${failureMessage(error)}`, "error")
       }
-      if (ctx.hasUI) ctx.ui.setStatus("codex-account-pool", `Codex Pool: ${account.label}`)
+      setPoolStatus(ctx, account.label)
     }
     waitTimer = setInterval(() => void (async () => {
       const job = waiting[sessionId(ctx)]

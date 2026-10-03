@@ -71,6 +71,8 @@ O summarizer é usado somente pelo comando manual `/codex-handoff`. Ele tenta o 
 
 Em `/model`, escolha entradas como `codex-account-pool/gpt-6.1-sol`. O provider original `openai-codex` continua disponível separadamente. O Codex CLI é opcional: o pool consulta diretamente, com o OAuth das contas já cadastradas, o catálogo do backend usado pelo cliente oficial. Só metadados públicos dos modelos são salvos em `~/.pi/agent/codex-account-pool/official-models.json`; nenhum token é salvo nesse arquivo. Se o endpoint falhar, mantém o catálogo anterior. O backend filtra por versão do cliente; sem CLI usa `0.159.0` como versão-base, ajustável por `PI_CODEX_MODEL_CLIENT_VERSION`. `GET https://api.openai.com/v1/models` usa uma **chave de API separada** e lista modelos de API, que não são necessariamente aceitos pelo Codex/ChatGPT; não são misturados ao pool.
 
+O status `Codex Pool: <conta>` aparece na barra somente enquanto o modelo atual usa o provider `codex-account-pool`. Trocar de provider remove o texto inteiro; voltar ao pool mostra a conta vinculada à sessão.
+
 No menu, adicione as contas e escolha **Usar nesta sessão**. O agente também pode usar:
 
 - `codex_accounts_list`
