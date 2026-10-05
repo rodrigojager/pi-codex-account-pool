@@ -19,7 +19,7 @@ import { atomicWrite, paths, transact } from "./storage"
 import { QuotaService, blockedUntil, nearLimit } from "./quota"
 import { addHandoffNote, clearPendingHandoff, completeWithFailover, createHandoff, getPendingHandoff, handoffContextMessage, loadHandoffSettings, saveHandoffSettings, type HandoffModelOptions, type ModelRef } from "./handoff"
 import { orderAccounts, rotateAccounts } from "./bindings"
-import { cooldownUntil, failureMessage, failureStatus, shouldRotateAccount } from "./failover"
+import { AccountModelAvailability, isAccountModelUnavailable, cooldownUntil, failureMessage, failureStatus, shouldRotateAccount } from "./failover"
 import { POOL_PROVIDER_ID as PROVIDER_ID, setPoolStatus, registerPoolStatus } from "./pool-status"
 
 const codexRuntime = createCodexRuntime(piAI)
@@ -29,6 +29,7 @@ const QUOTA_UPDATED_EVENT = "pi-quota:updated"
 const ACCOUNT_CHANGED_EVENT = "codex-account-pool:account-changed"
 const store = new AccountStore()
 const quota = new QuotaService(store)
+const accountModels = new AccountModelAvailability()
 const bindingsPath = join(paths.root, "bindings.json")
 const waitingPath = join(paths.root, "waiting.json")
 type WaitingJob = { sessionID: string; resumeAt: number; accountID?: string; reason: string }
@@ -277,8 +278,13 @@ async function* streamWithAccountPool(
 
   const sessionID = options.sessionId ?? "unbound"
   const managedSession = sessionContexts.has(sessionID)
-  const candidates = await candidateAccounts(sessionID)
+  const available = await candidateAccounts(sessionID)
+  const candidates = available.filter(account => !accountModels.isUnavailable(account.id, model.id))
   if (!candidates.length) {
+    if (available.length) {
+      yield poolError(model, `O modelo ${model.id} foi rejeitado pelas contas disponíveis. Escolha outra conta/modelo ou tente novamente em alguns minutos.`)
+      return
+    }
     if (managedSession) await queueQuotaWait(sessionID, "todas as contas estão em cooldown ou sem quota")
     yield poolError(model, "Todas as contas Codex estão temporariamente indisponíveis ou sem quota.")
     return
@@ -353,6 +359,17 @@ async function* streamWithAccountPool(
 
     const message = failureMessage(failure.error)
     const status = failureStatus(response, message)
+    if (isAccountModelUnavailable(status, message, model.id)) {
+      accountModels.markUnavailable(account.id, model.id)
+      lastFailure = failure
+      const next = candidates[index + 1]
+      if (next && managedSession) {
+        await activateAccount(sessionID, next)
+        if (ctx?.hasUI) ctx.ui.notify(`Modelo ${model.id} indisponível em ${account.label}; tentando ${next.label}.`, "warning")
+      }
+      // Keep this account usable for its other models; no account-wide cooldown.
+      continue
+    }
     if (!shouldRotateAccount(status, message)) {
       await store.recordOutcome(account.id, status ?? 520, false, cooldownUntil(status, response))
       yield failure
@@ -372,7 +389,7 @@ async function* streamWithAccountPool(
     }
   }
 
-  if (managedSession) {
+  if (managedSession && candidates.some(account => !accountModels.isUnavailable(account.id, model.id))) {
     await queueQuotaWait(sessionID, "todas as contas falharam durante o failover")
     const ctx = sessionContexts.get(sessionID)
     if (ctx?.hasUI) ctx.ui.notify("Todas as contas Codex estão indisponíveis; aguardando liberação de quota.", "warning")

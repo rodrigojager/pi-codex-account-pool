@@ -7,7 +7,7 @@ const source = await readFile(new URL("../src/failover.ts", import.meta.url), "u
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
 })
-const { cooldownUntil, failureMessage, failureStatus, shouldRotateAccount } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`)
+const { AccountModelAvailability, isAccountModelUnavailable, cooldownUntil, failureMessage, failureStatus, shouldRotateAccount } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`)
 
 test("rotates on HTTP auth, quota and server failures", () => {
   for (const status of [401, 403, 429, 500, 502, 503, 504]) {
@@ -40,4 +40,25 @@ test("429 honors numeric and date Retry-After values", () => {
 test("extracts provider error messages without losing Unicode", () => {
   assert.equal(failureMessage({ errorMessage: "Limite de uso atingido" }), "Limite de uso atingido")
   assert.equal(failureMessage(new Error("Autenticação inválida")), "Autenticação inválida")
+})
+
+test("account-specific model rejection is recognized without retrying unrelated bad requests", () => {
+  const message = "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+  for (const status of [400, undefined]) {
+    assert.equal(isAccountModelUnavailable(status, message, "gpt-6.1-sol"), true)
+    assert.equal(isAccountModelUnavailable(status, JSON.stringify({ detail: message }), "gpt-6.1-sol"), true)
+  }
+  assert.equal(isAccountModelUnavailable(400, message, "gpt-6-luna"), false)
+  assert.equal(isAccountModelUnavailable(400, "This content was flagged for possible cybersecurity risk.", "gpt-6.1-sol"), false)
+  assert.equal(isAccountModelUnavailable(400, "invalid request", "gpt-6.1-sol"), false)
+  assert.equal(isAccountModelUnavailable(503, message, "gpt-6.1-sol"), false)
+})
+
+test("negative access observations expire and do not disable other models or accounts", () => {
+  const access = new AccountModelAvailability(1000)
+  access.markUnavailable("free", "gpt-6.1-sol", 100)
+  assert.equal(access.isUnavailable("free", "gpt-6.1-sol", 1099), true)
+  assert.equal(access.isUnavailable("pro", "gpt-6.1-sol", 101), false)
+  assert.equal(access.isUnavailable("free", "gpt-6-luna", 101), false)
+  assert.equal(access.isUnavailable("free", "gpt-6.1-sol", 1100), false)
 })

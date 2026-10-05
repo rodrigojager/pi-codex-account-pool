@@ -4,6 +4,37 @@ const LIMIT_PATTERN = /(?:usage[_ -]?limit|rate[_ -]?limit|too many requests|quo
 const AUTH_PATTERN = /(?:unauthori[sz]ed|forbidden|authentication|invalid[_ -]?token|expired[_ -]?token|token[^\n]*(?:invalid|expired|revoked))/iu
 const SERVER_PATTERN = /(?:internal server error|bad gateway|service unavailable|gateway timeout|server error)/iu
 
+/** This is an account/model rejection, not a broken credential or a global outage. */
+export function isAccountModelUnavailable(status: number | undefined, message: string, modelID: string) {
+  if (status !== undefined && status !== 400) return false
+  // SSE carries JSON; WebSocket transports may expose the detail as plain text.
+  try {
+    const payload = JSON.parse(message)
+    message = payload.detail ?? payload.error?.message ?? message
+  } catch { /* plain provider detail */ }
+  return message === `The '${modelID}' model is not supported when using Codex with a ChatGPT account.`
+}
+
+/** Short-lived negative observations; never infer access from a plan name or CLI cache. */
+export class AccountModelAvailability {
+  private readonly unavailable = new Map<string, number>()
+  constructor(private readonly ttlMs = 5 * 60_000) {}
+  private key(accountID: string, modelID: string) { return JSON.stringify([accountID, modelID]) }
+  markUnavailable(accountID: string, modelID: string, now = Date.now()) {
+    // Bound memory even if a long-lived host sees many accounts/models.
+    for (const [key, until] of this.unavailable) if (until <= now) this.unavailable.delete(key)
+    this.unavailable.set(this.key(accountID, modelID), now + this.ttlMs)
+  }
+  isUnavailable(accountID: string, modelID: string, now = Date.now()) {
+    const key = this.key(accountID, modelID)
+    const until = this.unavailable.get(key)
+    if (until === undefined) return false
+    if (until > now) return true
+    this.unavailable.delete(key)
+    return false
+  }
+}
+
 export function failureStatus(response: ProviderResponse | undefined, message: string): number | undefined {
   if (response) return response.status
   if (LIMIT_PATTERN.test(message)) return 429

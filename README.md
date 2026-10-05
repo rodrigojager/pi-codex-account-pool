@@ -14,6 +14,7 @@ Pool de contas ChatGPT Plus/Pro via OAuth exposto como provider próprio `codex-
 - Conta sticky por sessão do Pi.
 - Renovação automática de tokens.
 - Rotação imediata para outra conta após falhas 401/403/429/5xx, com repetição da mesma solicitação.
+- Quando uma conta rejeita especificamente o modelo escolhido, tenta a próxima conta com o mesmo modelo. A rejeição fica em memória por 5 minutos apenas para aquele par conta/modelo, sem cooldown global e sem aguardar reset de quota quando todas rejeitam o modelo. Erros genéricos de requisição e recusas de conteúdo continuam sendo reportados diretamente.
 - Compatibilidade com os transportes SSE e WebSocket do Codex.
 - Seleção de conta pelo TUI e ferramentas para o agente.
 - Estado separado por projeto/sessão, sem expor tokens ao modelo.

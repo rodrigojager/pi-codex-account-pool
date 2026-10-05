@@ -87,6 +87,7 @@ test("bridge pushes sanitized updates and preserves source fetchedAt on cached r
       if (name === "./store") return { AccountStore: MemoryStore }
       if (name === "./quota") return { QuotaService: class extends QuotaService { constructor(store) { super(store, async () => Response.json(payload(used))) } } }
       if (name === "./pi-runtime") return { createCodexRuntime: () => ({}) }
+      if (name === "./failover") return { AccountModelAvailability: class {} }
       if (name === "./storage") return { paths: { root: "offline" } }
       if (name === "./pool-status") return poolStatus
       if (name === "node:fs/promises") return { readFile: async () => "{}" }
