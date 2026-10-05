@@ -29,10 +29,11 @@ test("actual Pi provider retries the same model on another account without a glo
     const context = { messages: [{ role: "user", content: "Offline test", timestamp: 1 }] }
     async function run(selectedModel, fetchFn) {
       const payloads = []
+      let starts = 0
       const stream = provider.streamSimple(selectedModel, context, { transport: "sse", fetch: fetchFn, maxRetries: 0, onPayload: payload => { payloads.push(payload.model) } })
-      for await (const _event of stream) { /* no external network */ }
+      for await (const event of stream) { if (event.type === "start") starts++ }
       const result = await stream.result()
-      return { result, payloads }
+      return { result, payloads, starts }
     }
     const first = await run(model, fetch)
     assert.equal(first.result.stopReason, "stop", first.result.errorMessage)
@@ -52,6 +53,19 @@ test("actual Pi provider retries the same model on another account without a glo
     assert.equal(other.result.stopReason, "stop", other.result.errorMessage)
     assert.deepEqual(requests, ["free"])
     requests.length = 0
+    const streamed = await run({ ...model, id: "gpt-stream-model" }, async (_url, init) => {
+      const id = new Headers(init.headers).get("chatgpt-account-id")
+      requests.push(id)
+      const event = id === "free"
+        ? { type: "error", code: "invalid_request_error", message: "The 'gpt-stream-model' model is not supported when using Codex with a ChatGPT account." }
+        : { type: "response.completed", response: { status: "completed", output: [] } }
+      return new Response(`data: ${JSON.stringify(event)}\n\n`, { headers: { "content-type": "text/event-stream" } })
+    })
+    assert.equal(streamed.result.stopReason, "stop", streamed.result.errorMessage)
+    assert.deepEqual(requests, ["free", "pro"], "a transport start does not mean model output was produced")
+    assert.deepEqual(streamed.payloads, ["gpt-stream-model", "gpt-stream-model"])
+    assert.equal(streamed.starts, 1, "the parent sees one request start across an empty retry")
+    requests.length = 0
     const unavailable = { ...model, id: "gpt-inaccessible" }
     const reject = async (_url, init) => {
       requests.push(new Headers(init.headers).get("chatgpt-account-id"))
@@ -64,6 +78,19 @@ test("actual Pi provider retries the same model on another account without a glo
     assert.equal(repeated.result.stopReason, "error")
     assert.match(repeated.result.errorMessage, /modelo gpt-inaccessible foi rejeitado/)
     assert.deepEqual(requests, [], "all rejected accounts fail clearly without repeating requests")
+    const partial = await run({ ...model, id: "gpt-partial-model" }, async (_url, init) => {
+      requests.push(new Headers(init.headers).get("chatgpt-account-id"))
+      const events = [
+        { type: "response.output_item.added", output_index: 0, item: { id: "item-1", type: "message", role: "assistant", status: "in_progress", content: [] } },
+        { type: "response.content_part.added", output_index: 0, content_index: 0, item_id: "item-1", part: { type: "output_text", text: "" } },
+        { type: "response.output_text.delta", output_index: 0, content_index: 0, item_id: "item-1", delta: "partial output" },
+        { type: "error", message: "The 'gpt-partial-model' model is not supported when using Codex with a ChatGPT account." },
+      ]
+      return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } })
+    })
+    assert.equal(partial.result.stopReason, "error")
+    assert.deepEqual(requests, ["free"], "never replay a request after model output has begun")
+    assert.equal(partial.result.content.find(part => part.type === "text").text, "partial output")
   } finally {
     if (before === undefined) delete process.env.PI_CODEX_ACCOUNT_POOL_DATA_DIR
     else process.env.PI_CODEX_ACCOUNT_POOL_DATA_DIR = before

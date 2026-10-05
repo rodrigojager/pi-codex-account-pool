@@ -6,13 +6,14 @@ const SERVER_PATTERN = /(?:internal server error|bad gateway|service unavailable
 
 /** This is an account/model rejection, not a broken credential or a global outage. */
 export function isAccountModelUnavailable(status: number | undefined, message: string, modelID: string) {
-  if (status !== undefined && status !== 400) return false
+  if (status !== undefined && status !== 400 && status !== 200) return false
   // SSE carries JSON; WebSocket transports may expose the detail as plain text.
   try {
     const payload = JSON.parse(message)
     message = payload.detail ?? payload.error?.message ?? message
   } catch { /* plain provider detail */ }
-  return message === `The '${modelID}' model is not supported when using Codex with a ChatGPT account.`
+  if (typeof message !== "string") return false
+  return message.replace(/^Codex error: /u, "") === `The '${modelID}' model is not supported when using Codex with a ChatGPT account.`
 }
 
 /** Short-lived negative observations; never infer access from a plan name or CLI cache. */

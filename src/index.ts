@@ -291,6 +291,7 @@ async function* streamWithAccountPool(
   }
 
   let lastFailure: AssistantMessageEvent | undefined
+  let parentStarted = false
   for (let index = 0; index < candidates.length; index++) {
     const selected = candidates[index]
     let account: Account
@@ -326,15 +327,26 @@ async function* streamWithAccountPool(
     })
 
     let started = false
+    let outputStarted = false
     let completed = false
     let failure: Extract<AssistantMessageEvent, { type: "error" }> | undefined
     for await (const event of source) {
-      if (event.type === "start") started = true
+      if (event.type === "start") {
+        started = true
+        // A transport handshake can precede an account/model rejection.
+        // The retried empty response belongs to the same parent request.
+        if (parentStarted) continue
+        parentStarted = true
+      } else if (event.type !== "error" && event.type !== "done") outputStarted = true
       if (event.type === "done") completed = true
       if (event.type === "error") {
         if (started) {
           const message = failureMessage(event.error)
           const status = failureStatus(response, message)
+          if (!outputStarted && isAccountModelUnavailable(status, message, model.id)) {
+            failure = event
+            break
+          }
           await store.recordOutcome(account.id, status ?? 520, false, cooldownUntil(status, response))
           if (status === 429) void quota.refresh(account, true).catch(() => {})
           yield event

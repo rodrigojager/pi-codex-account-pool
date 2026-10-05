@@ -48,6 +48,7 @@ test("account-specific model rejection is recognized without retrying unrelated 
     assert.equal(isAccountModelUnavailable(status, message, "gpt-6.1-sol"), true)
     assert.equal(isAccountModelUnavailable(status, JSON.stringify({ detail: message }), "gpt-6.1-sol"), true)
   }
+  for (const status of [200, undefined]) assert.equal(isAccountModelUnavailable(status, `Codex error: ${message}`, "gpt-6.1-sol"), true)
   assert.equal(isAccountModelUnavailable(400, message, "gpt-6-luna"), false)
   assert.equal(isAccountModelUnavailable(400, "This content was flagged for possible cybersecurity risk.", "gpt-6.1-sol"), false)
   assert.equal(isAccountModelUnavailable(400, "invalid request", "gpt-6.1-sol"), false)
